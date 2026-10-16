@@ -13,3 +13,5 @@
 - 2026-10-16: for the 2.0 s gap, a "kept cue" is a cue outside the sponsor segments that still has at least one line after step 4; the gap is measured from the end of the previous such cue.
 - 2026-10-16: tags are removed with the single pattern `<[^>]*>` (which covers every tag kind of step 3) before entities are decoded, so a decoded `&lt;` survives; bracketed annotations do not span lines.
 - 2026-10-16: the 2.0 s gap is compared in whole milliseconds (VTT times are millisecond-exact), so float error never hides a gap; a cue whose lines are all rolling duplicates is not a kept cue, which is the reading of step 5 we keep.
+- 2026-10-16: the SponsorBlock client uses stdlib `urllib` (`fetch_segments(base_url, video_id, request_id)` returns the segments and `ok`/`none`/`error`); a 200 whose body is not the expected JSON counts as `error` with no segments, and the `sponsorblock.call` line is `info` for `ok`/`none` and `warn` for `error`.
+- 2026-10-16: `sponsor_ratio(segments, duration)` returns 0 when the duration is not positive; the cue cut of step 2 is the existing `clean_cues` midpoint rule.
