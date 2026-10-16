@@ -4,9 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 uv sync --locked --project node
-uv run --locked --project node ruff check node
-uv run --locked --project node ruff format --check node
-(cd node && uv run --locked mypy --strict src tests)
+uv run --locked --project node ruff check node scripts/contracts_gen.py
+uv run --locked --project node ruff format --check node scripts/contracts_gen.py
+(cd node && uv run --locked mypy --strict src tests ../scripts/contracts_gen.py)
 
 (cd worker && npm ci && npx tsc --noEmit && npx eslint .)
 
