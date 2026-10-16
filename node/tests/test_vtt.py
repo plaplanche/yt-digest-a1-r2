@@ -43,9 +43,10 @@ def test_auto_track_removes_rolling_duplicates_and_inline_timestamps() -> None:
 
 def test_annotations_and_entities() -> None:
     paragraphs = clean_cues(load("annotated.vtt"), [])
-    assert paragraphs[0].startswith("Tom & Jerry <3 cheese")
-    assert "[" not in "".join(paragraphs)
-    assert paragraphs[1] == 'Gap of 2.0 seconds splits. "ok"'
+    assert paragraphs == [
+        "Tom & Jerry <3 cheese Gap of 1.9 seconds stays.",
+        'Gap of 2.0 seconds splits. "ok"',
+    ]
 
 
 def test_gap_of_1_9_does_not_split_and_2_0_does() -> None:
@@ -78,3 +79,26 @@ def test_segments_drop_cues_by_midpoint() -> None:
 def test_empty_input() -> None:
     assert clean_cues([], []) == []
     assert parse_vtt("WEBVTT\n") == []
+
+
+def test_gap_of_2_0_splits_even_when_not_exact_in_floats() -> None:
+    text = "WEBVTT\n\n00:00:00.000 --> 00:00:01.300\na\n\n00:00:03.300 --> 00:00:04.000\nb\n"
+    assert clean_cues(parse_vtt(text), []) == ["a", "b"]
+
+
+def test_note_style_region_blocks_are_skipped_even_with_a_timing_line() -> None:
+    text = (
+        "WEBVTT\n\nNOTE\n00:00:00.000 --> 00:00:01.000\nhidden\n\n"
+        "STYLE\n00:00:01.000 --> 00:00:02.000\nhidden\n\n"
+        "REGION id:x\n00:00:02.000 --> 00:00:03.000\nhidden\n\n"
+        "00:00:03.000 --> 00:00:04.000\nshown\n"
+    )
+    assert [c.lines for c in parse_vtt(text)] == [("shown",)]
+
+
+def test_cue_identifier_starting_with_a_keyword_is_kept() -> None:
+    text = (
+        "WEBVTT\n\nNOTE1\n00:00:00.000 --> 00:00:01.000\na\n\n"
+        "REGION-intro\n00:00:01.000 --> 00:00:02.000\nb\n"
+    )
+    assert [c.lines for c in parse_vtt(text)] == [("a",), ("b",)]

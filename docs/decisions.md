@@ -12,3 +12,4 @@
 - 2026-10-16: VTT code lives in `yt_digest_node/vtt.py`; `clean_cues` takes segments as `(start, end)` float tuples and returns the paragraphs as a list of strings (joining with `\n\n` is left to the caller).
 - 2026-10-16: for the 2.0 s gap, a "kept cue" is a cue outside the sponsor segments that still has at least one line after step 4; the gap is measured from the end of the previous such cue.
 - 2026-10-16: tags are removed with the single pattern `<[^>]*>` (which covers every tag kind of step 3) before entities are decoded, so a decoded `&lt;` survives; bracketed annotations do not span lines.
+- 2026-10-16: the 2.0 s gap is compared in whole milliseconds (VTT times are millisecond-exact), so float error never hides a gap; a cue whose lines are all rolling duplicates is not a kept cue, which is the reading of step 5 we keep.

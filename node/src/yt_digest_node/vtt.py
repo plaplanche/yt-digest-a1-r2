@@ -4,14 +4,14 @@ from dataclasses import dataclass
 
 Segment = tuple[float, float]
 
-PARAGRAPH_GAP = 2.0
+PARAGRAPH_GAP_MS = 2000
 
 _TIMING = re.compile(
     r"^\s*((?:\d+:)?\d+:\d{2}\.\d{3})\s+-->\s+((?:\d+:)?\d+:\d{2}\.\d{3})(?:\s.*)?$"
 )
 _TAG = re.compile(r"<[^>]*>")
 _ANNOTATION = re.compile(r"\[[^\]]*\]")
-_IGNORED_BLOCKS = ("WEBVTT", "NOTE", "STYLE", "REGION")
+_IGNORED_BLOCK = re.compile(r"^(?:WEBVTT|NOTE|STYLE|REGION)(?:[ \t]|$)")
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,7 @@ def parse_vtt(text: str) -> list[Cue]:
     cues: list[Cue] = []
     for block in re.split(r"\n{2,}", text.replace("\r\n", "\n").replace("\r", "\n")):
         lines = block.strip("\n").split("\n")
-        if not lines or lines[0].startswith(_IGNORED_BLOCKS):
+        if not lines or _IGNORED_BLOCK.match(lines[0]):
             continue
         for i, line in enumerate(lines[:2]):
             match = _TIMING.match(line)
@@ -49,6 +49,10 @@ def _clean_line(line: str) -> str:
     return " ".join(_ANNOTATION.sub("", line).split())
 
 
+def _millis(seconds: float) -> int:
+    return round(seconds * 1000)
+
+
 def _in_segment(cue: Cue, segments: list[Segment]) -> bool:
     middle = (cue.start + cue.end) / 2
     return any(start <= middle < end for start, end in segments)
@@ -56,7 +60,7 @@ def _in_segment(cue: Cue, segments: list[Segment]) -> bool:
 
 def clean_cues(cues: list[Cue], segments: list[Segment]) -> list[str]:
     paragraphs: list[list[str]] = []
-    previous_end: float | None = None
+    previous_end: int | None = None
     last_line: str | None = None
     for cue in cues:
         if _in_segment(cue, segments):
@@ -69,8 +73,11 @@ def clean_cues(cues: list[Cue], segments: list[Segment]) -> list[str]:
                 last_line = line
         if not kept:
             continue
-        if previous_end is None or cue.start - previous_end >= PARAGRAPH_GAP:
+        if (
+            previous_end is None
+            or _millis(cue.start) - previous_end >= PARAGRAPH_GAP_MS
+        ):
             paragraphs.append([])
         paragraphs[-1].extend(kept)
-        previous_end = cue.end
+        previous_end = _millis(cue.end)
     return [" ".join(lines) for lines in paragraphs]
