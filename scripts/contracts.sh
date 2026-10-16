@@ -4,4 +4,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-exec uv run --no-project python scripts/contracts_gen.py "$@"
+exec uv run --no-project --python 3.12 python scripts/contracts_gen.py "$@"

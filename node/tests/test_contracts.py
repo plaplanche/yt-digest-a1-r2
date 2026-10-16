@@ -76,6 +76,8 @@ def test_valid_log_line_is_accepted() -> None:
         {"extra": 1},
         {"level": "fatal"},
         {"ts": "2026-10-16 12:00:00"},
+        {"request_id": None},
+        {"video_id": None},
     ],
 )
 def test_invalid_log_line_is_rejected(change: dict[str, object]) -> None:
@@ -131,3 +133,20 @@ def test_check_fails_when_a_schema_changes(repo_copy: Path) -> None:
     assert result.returncode == 1
     assert "worker/src/contracts/log-event.ts" in result.stderr
     assert "node/src/yt_digest_node/contracts/log_event.py" in result.stderr
+
+
+def test_generate_survives_pycache_and_matches_check(repo_copy: Path) -> None:
+    cache = repo_copy / "node/src/yt_digest_node/contracts/__pycache__"
+    cache.mkdir()
+    (cache / "x.pyc").write_bytes(b"")
+    (repo_copy / GENERATED[0]).write_text("// stale\n")
+    result = subprocess.run(
+        [str(repo_copy / "scripts/contracts.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=repo_copy,
+    )
+    assert result.returncode == 0, result.stderr
+    assert cache.is_dir()
+    assert check(repo_copy).returncode == 0

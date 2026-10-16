@@ -70,8 +70,7 @@ def gen_python(schema: dict[str, Any], schema_file: str) -> str:
         else:
             annotation, args = py_type(prop, uses)
         if name not in required:
-            annotation += " | None"
-            args.insert(0, "default=None")
+            args.insert(0, "default=None")  # optional means absent, never null
         if args:
             uses.add("Field")
             line = f"    {name}: {annotation} = Field({', '.join(args)})"
@@ -79,6 +78,8 @@ def gen_python(schema: dict[str, Any], schema_file: str) -> str:
                 line = f"    {name}: {annotation} = Field(\n        {', '.join(args)}\n    )"
         else:
             line = f"    {name}: {annotation}"
+        if name not in required:
+            line += "  # type: ignore[assignment]"
         fields.append(line)
     out = header("#", schema_file) + "\n"
     if "StrEnum" in uses:
@@ -165,7 +166,8 @@ def main(argv: list[str]) -> int:
     if not argv:
         for directory in (TS_DIR, PY_DIR):
             for old in (ROOT / directory).glob("*"):
-                old.unlink()
+                if old.is_file():
+                    old.unlink()
         for rel, text in files.items():
             target = ROOT / rel
             target.parent.mkdir(parents=True, exist_ok=True)

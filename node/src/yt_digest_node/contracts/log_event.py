@@ -21,6 +21,6 @@ class LogEvent(BaseModel):
     level: Literal["debug", "info", "warn", "error"]
     service: Literal["node", "worker"]
     event: LogEventName
-    request_id: str | None = Field(default=None)
-    video_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{11}$")
+    request_id: str = Field(default=None)  # type: ignore[assignment]
+    video_id: str = Field(default=None, pattern=r"^[A-Za-z0-9_-]{11}$")  # type: ignore[assignment]
     attrs: dict[str, object]

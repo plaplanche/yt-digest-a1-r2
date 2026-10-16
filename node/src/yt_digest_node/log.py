@@ -22,4 +22,4 @@ def emit(event: str, level: str = "info", **fields: object) -> None:
             **fields,
         }
     )
-    sys.stderr.write(line.model_dump_json(exclude_none=True) + "\n")
+    sys.stderr.write(line.model_dump_json(exclude_unset=True) + "\n")
