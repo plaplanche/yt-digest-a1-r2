@@ -9,3 +9,6 @@
 - 2026-10-16: the log schema does not tie each event to its service or its `attrs` keys (the spec's tables are documentation); TypeScript has no generated runtime validator, so worker tests validate against the schema files with `ajv` (dev dependency), and `log.ts` checks event, field names and level at runtime.
 - 2026-10-16: optional log fields (`request_id`, `video_id`) are typed non-null like the schema; the Python models default them to `None` only to mean "absent", and the logger writes with `exclude_unset` so the key is left out; the generator is run with `--python 3.12`.
 - 2026-10-16: the catalogue is generated in TypeScript as a `LOG_EVENT_NAMES` const array with the `LogEventName` union derived from it, so `log.ts` can check names at runtime.
+- 2026-10-16: VTT code lives in `yt_digest_node/vtt.py`; `clean_cues` takes segments as `(start, end)` float tuples and returns the paragraphs as a list of strings (joining with `\n\n` is left to the caller).
+- 2026-10-16: for the 2.0 s gap, a "kept cue" is a cue outside the sponsor segments that still has at least one line after step 4; the gap is measured from the end of the previous such cue.
+- 2026-10-16: tags are removed with the single pattern `<[^>]*>` (which covers every tag kind of step 3) before entities are decoded, so a decoded `&lt;` survives; bracketed annotations do not span lines.
