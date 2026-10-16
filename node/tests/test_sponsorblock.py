@@ -1,6 +1,7 @@
 import json
 import socket
 import threading
+import urllib.request
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
@@ -18,6 +19,9 @@ reply: dict[str, Any] = {}
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         seen.append(self.path)
+        if "raw" in reply:
+            self.wfile.write(reply["raw"])
+            return
         body = reply["body"]
         self.send_response(reply["status"])
         self.end_headers()
@@ -30,6 +34,7 @@ class Handler(BaseHTTPRequestHandler):
 @pytest.fixture
 def server() -> Iterator[str]:
     seen.clear()
+    reply.clear()
     httpd = HTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -92,6 +97,49 @@ def test_malformed_200_is_error(
     result = fetch_segments(server, VIDEO)
     assert (result.state, result.segments) == ("error", [])
     assert log_line(capsys)["attrs"]["segments"] == 0
+
+
+def test_truncated_body_is_error(
+    server: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reply.update(raw=b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n[{")
+    result = fetch_segments(server, VIDEO)
+    assert (result.state, result.segments) == ("error", [])
+    line = log_line(capsys)
+    assert (line["attrs"]["status"], line["attrs"]["segments"]) == (200, 0)
+
+
+def test_garbage_status_line_is_error(
+    server: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reply.update(raw=b"garbage\r\n\r\n")
+    result = fetch_segments(server, VIDEO)
+    assert (result.state, result.segments) == ("error", [])
+    line = log_line(capsys)
+    assert (line["attrs"]["status"], line["attrs"]["segments"]) == (0, 0)
+
+
+def test_non_finite_bounds_are_error(
+    server: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reply.update(status=200, body=b'[{"segment": [NaN, Infinity]}]')
+    result = fetch_segments(server, VIDEO)
+    assert (result.state, result.segments) == ("error", [])
+    assert log_line(capsys)["attrs"]["segments"] == 0
+
+
+def test_timeout_is_10_seconds(server: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    timeouts: list[float] = []
+    real = urllib.request.urlopen
+
+    def spy(url: str, timeout: float) -> Any:
+        timeouts.append(timeout)
+        return real(url, timeout=timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", spy)
+    reply.update(status=404, body=b"")
+    fetch_segments(server, VIDEO)
+    assert timeouts == [10]
 
 
 def test_connection_refused_is_error_with_status_0(

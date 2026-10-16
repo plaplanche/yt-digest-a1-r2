@@ -1,4 +1,6 @@
+import http.client
 import json
+import math
 import time
 import urllib.error
 import urllib.parse
@@ -25,7 +27,10 @@ def _parse(body: bytes) -> list[Segment]:
     segments: list[Segment] = []
     for item in json.loads(body):
         start, end = item["segment"]
-        segments.append((float(start), float(end)))
+        start, end = float(start), float(end)
+        if not (math.isfinite(start) and math.isfinite(end)):
+            raise ValueError("non-finite segment bound")
+        segments.append((start, end))
     return segments
 
 
@@ -51,9 +56,10 @@ def fetch_segments(
                 state = "ok"
     except urllib.error.HTTPError as error:
         status = error.code
+        error.close()
         if status == 404:
             state = "none"
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError):
         # network error, malformed JSON or unexpected item shape
         segments = []
         state = "error"
