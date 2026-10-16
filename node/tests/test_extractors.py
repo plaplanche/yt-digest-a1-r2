@@ -56,6 +56,23 @@ def test_choice_none() -> None:
     assert choose_track([Track("de", "manual", "X")], ["fr", "en"]) is None
 
 
+def test_fixture_files_to_choice(tmp_path: Path) -> None:
+    _video(
+        tmp_path,
+        {"meta.json": '{"duration": 1}', "fr.auto.vtt": "A", "en.manual.vtt": "B"},
+    )
+    result = FakeExtractor(tmp_path).extract("abc")
+    assert isinstance(result, Extraction)
+    assert choose_track(result.tracks, ["fr", "en"]) == Track("en", "manual", "B")
+
+
+def test_fixture_only_german_manual_is_no_transcript(tmp_path: Path) -> None:
+    _video(tmp_path, {"meta.json": '{"duration": 1}', "de.manual.vtt": "X"})
+    result = FakeExtractor(tmp_path).extract("abc")
+    assert isinstance(result, Extraction)
+    assert choose_track(result.tracks, ["fr", "en"]) is None
+
+
 def test_make_extractor_fake(tmp_path: Path) -> None:
     env = {"FETCHER_FAKE_YTDLP": "1", "FAKE_YTDLP_DIR": str(tmp_path)}
     assert isinstance(make_extractor(env), FakeExtractor)
@@ -73,7 +90,17 @@ class _DownloadError(Exception):
     pass
 
 
-def _stub(info: dict[str, Any] | Exception, seen: dict[str, Any]) -> types.ModuleType:
+class _RequestError(Exception):
+    def __init__(self, status: int | None = None) -> None:
+        super().__init__("request failed")
+        self.status = status
+
+
+def _stub(
+    info: dict[str, Any] | Exception,
+    seen: dict[str, Any],
+    open_error: Exception | None = None,
+) -> types.ModuleType:
     class Response:
         def read(self) -> bytes:
             return b"WEBVTT"
@@ -96,11 +123,16 @@ def _stub(info: dict[str, Any] | Exception, seen: dict[str, Any]) -> types.Modul
             return info
 
         def urlopen(self, url: str) -> Response:
+            if open_error is not None:
+                raise open_error
             return Response()
 
     module = types.ModuleType("yt_dlp")
     module.YoutubeDL = YoutubeDL  # type: ignore[attr-defined]
     module.utils = types.SimpleNamespace(DownloadError=_DownloadError)  # type: ignore[attr-defined]
+    module.networking = types.SimpleNamespace(  # type: ignore[attr-defined]
+        exceptions=types.SimpleNamespace(RequestError=_RequestError)
+    )
     return module
 
 
@@ -143,3 +175,33 @@ def test_ytdlp_bot_check_is_blocked() -> None:
         YtDlpExtractor((0, 0), _stub(error, {}), lambda s: None).extract("abc")
         == "blocked"
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(429, "blocked"), (403, "blocked"), (404, "unavailable"), (None, "unavailable")],
+)
+def test_ytdlp_subtitle_fetch_error_is_mapped(
+    status: int | None, expected: str
+) -> None:
+    info = {"duration": 3, "subtitles": {"en": [{"ext": "vtt", "url": "u"}]}}
+    stub = _stub(info, {}, _RequestError(status))
+    assert YtDlpExtractor((0, 0), stub, lambda s: None).extract("abc") == expected
+
+
+def test_ytdlp_too_many_requests_is_blocked() -> None:
+    error = _DownloadError("HTTP Error 429: Too Many Requests")
+    assert (
+        YtDlpExtractor((0, 0), _stub(error, {}), lambda s: None).extract("abc")
+        == "blocked"
+    )
+
+
+def test_delay_range_reaches_sleep() -> None:
+    info = {"duration": 3, "subtitles": {"en": [{"ext": "vtt", "url": "u"}]}}
+    delays: list[float] = []
+    YtDlpExtractor(parse_delay("1-1"), _stub(info, {}), delays.append).extract("abc")
+    assert delays == [1.0, 1.0]
+    extractor = make_extractor({"YT_DELAY_SECONDS": "7"})
+    assert isinstance(extractor, YtDlpExtractor)
+    assert extractor._delay == (7.0, 7.0)

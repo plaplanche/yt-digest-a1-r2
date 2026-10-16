@@ -106,8 +106,13 @@ class YtDlpExtractor(Extractor):
                                 tracks.append(Track(lang, kind, body.decode("utf-8")))
                                 break
                 return Extraction(float(info.get("duration") or 0), tracks)
+        except self._yt_dlp.networking.exceptions.RequestError as error:
+            if getattr(error, "status", None) in (403, 429):
+                return "blocked"
+            return "unavailable"
         except self._yt_dlp.utils.DownloadError as error:
-            if "not a bot" in str(error):
+            message = str(error)
+            if "not a bot" in message or "Too Many Requests" in message:
                 return "blocked"
             return "unavailable"
 
