@@ -14,6 +14,8 @@ from yt_digest_node.extractors import (
     parse_delay,
 )
 
+LANGS = ["fr", "en"]
+
 
 def _video(root: Path, files: dict[str, str]) -> None:
     (root / "abc").mkdir()
@@ -22,13 +24,13 @@ def _video(root: Path, files: dict[str, str]) -> None:
 
 
 def test_missing_directory_is_unavailable(tmp_path: Path) -> None:
-    assert FakeExtractor(tmp_path).extract("abc") == "unavailable"
+    assert FakeExtractor(tmp_path).extract("abc", LANGS) == "unavailable"
 
 
 @pytest.mark.parametrize("status", ["blocked", "unavailable"])
 def test_meta_status_is_returned(tmp_path: Path, status: str) -> None:
     _video(tmp_path, {"meta.json": json.dumps({"duration": 5, "status": status})})
-    assert FakeExtractor(tmp_path).extract("abc") == status
+    assert FakeExtractor(tmp_path).extract("abc", LANGS) == status
 
 
 def test_fake_tracks(tmp_path: Path) -> None:
@@ -36,7 +38,7 @@ def test_fake_tracks(tmp_path: Path) -> None:
         tmp_path,
         {"meta.json": '{"duration": 12}', "fr.auto.vtt": "A", "en.manual.vtt": "B"},
     )
-    result = FakeExtractor(tmp_path).extract("abc")
+    result = FakeExtractor(tmp_path).extract("abc", LANGS)
     assert result == Extraction(
         12, [Track("en", "manual", "B"), Track("fr", "auto", "A")]
     )
@@ -61,14 +63,14 @@ def test_fixture_files_to_choice(tmp_path: Path) -> None:
         tmp_path,
         {"meta.json": '{"duration": 1}', "fr.auto.vtt": "A", "en.manual.vtt": "B"},
     )
-    result = FakeExtractor(tmp_path).extract("abc")
+    result = FakeExtractor(tmp_path).extract("abc", LANGS)
     assert isinstance(result, Extraction)
     assert choose_track(result.tracks, ["fr", "en"]) == Track("en", "manual", "B")
 
 
 def test_fixture_only_german_manual_is_no_transcript(tmp_path: Path) -> None:
     _video(tmp_path, {"meta.json": '{"duration": 1}', "de.manual.vtt": "X"})
-    result = FakeExtractor(tmp_path).extract("abc")
+    result = FakeExtractor(tmp_path).extract("abc", LANGS)
     assert isinstance(result, Extraction)
     assert choose_track(result.tracks, ["fr", "en"]) is None
 
@@ -90,20 +92,16 @@ class _DownloadError(Exception):
     pass
 
 
-class _RequestError(Exception):
-    def __init__(self, status: int | None = None) -> None:
-        super().__init__("request failed")
-        self.status = status
-
-
 def _stub(
     info: dict[str, Any] | Exception,
     seen: dict[str, Any],
-    open_error: Exception | None = None,
+    body: bytes = b"WEBVTT",
 ) -> types.ModuleType:
+    seen["opened"] = []
+
     class Response:
         def read(self) -> bytes:
-            return b"WEBVTT"
+            return body
 
     class YoutubeDL:
         def __init__(self, options: dict[str, Any]) -> None:
@@ -123,32 +121,29 @@ def _stub(
             return info
 
         def urlopen(self, url: str) -> Response:
-            if open_error is not None:
-                raise open_error
+            seen["opened"].append(url)
             return Response()
 
     module = types.ModuleType("yt_dlp")
     module.YoutubeDL = YoutubeDL  # type: ignore[attr-defined]
     module.utils = types.SimpleNamespace(DownloadError=_DownloadError)  # type: ignore[attr-defined]
-    module.networking = types.SimpleNamespace(  # type: ignore[attr-defined]
-        exceptions=types.SimpleNamespace(RequestError=_RequestError)
-    )
     return module
 
 
-def test_ytdlp_options_and_tracks() -> None:
+def test_ytdlp_options_and_only_chosen_track_is_fetched() -> None:
     seen: dict[str, Any] = {}
     info = {
         "duration": 30,
         "subtitles": {
-            "en": [{"ext": "json3", "url": "u0"}, {"ext": "vtt", "url": "u1"}]
+            "en": [{"ext": "json3", "url": "u0"}, {"ext": "vtt", "url": "u1"}],
+            "de": [{"ext": "vtt", "url": "u3"}],
         },
         "automatic_captions": {"fr": [{"ext": "vtt", "url": "u2"}]},
     }
     delays: list[float] = []
     extractor = YtDlpExtractor((0.0, 0.0), _stub(info, seen), delays.append)
-    assert extractor.extract("abc") == Extraction(
-        30, [Track("en", "manual", "WEBVTT"), Track("fr", "auto", "WEBVTT")]
+    assert extractor.extract("abc", LANGS) == Extraction(
+        30, [Track("en", "manual", "WEBVTT")]
     )
     options = seen["options"]
     assert options["skip_download"] is True
@@ -158,13 +153,47 @@ def test_ytdlp_options_and_tracks() -> None:
     assert not {"cookiefile", "cookiesfrombrowser"} & options.keys()
     assert seen["download"] is False
     assert seen["url"].endswith("abc")
-    assert len(delays) == 3
+    assert seen["opened"] == ["u1"]
+    assert len(delays) == 2
+
+
+def test_ytdlp_prefers_original_auto_caption_over_translation() -> None:
+    seen: dict[str, Any] = {}
+    info = {
+        "duration": 3,
+        "automatic_captions": {
+            "fr": [{"ext": "vtt", "url": "tr"}],
+            "en-orig": [{"ext": "vtt", "url": "orig"}],
+            "en": [{"ext": "vtt", "url": "en"}],
+        },
+    }
+    extractor = YtDlpExtractor((0, 0), _stub(info, seen), lambda s: None)
+    assert extractor.extract("abc", LANGS) == Extraction(
+        3, [Track("en", "auto", "WEBVTT")]
+    )
+    assert seen["opened"] == ["orig"]
+
+
+def test_ytdlp_no_matching_track_fetches_nothing() -> None:
+    seen: dict[str, Any] = {}
+    info = {"duration": 3, "subtitles": {"de": [{"ext": "vtt", "url": "u"}]}}
+    extractor = YtDlpExtractor((0, 0), _stub(info, seen), lambda s: None)
+    assert extractor.extract("abc", LANGS) == Extraction(3, [])
+    assert seen["opened"] == []
+
+
+def test_ytdlp_non_utf8_body_does_not_raise() -> None:
+    info = {"duration": 3, "subtitles": {"en": [{"ext": "vtt", "url": "u"}]}}
+    stub = _stub(info, {}, body=b"WEBVTT \xff")
+    result = YtDlpExtractor((0, 0), stub, lambda s: None).extract("abc", LANGS)
+    assert isinstance(result, Extraction)
+    assert result.tracks[0].vtt == "WEBVTT \ufffd"
 
 
 def test_ytdlp_private_video_is_unavailable() -> None:
     error = _DownloadError("ERROR: [youtube] abc: Private video. Sign in")
     assert (
-        YtDlpExtractor((0, 0), _stub(error, {}), lambda s: None).extract("abc")
+        YtDlpExtractor((0, 0), _stub(error, {}), lambda s: None).extract("abc", LANGS)
         == "unavailable"
     )
 
@@ -172,27 +201,7 @@ def test_ytdlp_private_video_is_unavailable() -> None:
 def test_ytdlp_bot_check_is_blocked() -> None:
     error = _DownloadError("ERROR: Sign in to confirm you’re not a bot")
     assert (
-        YtDlpExtractor((0, 0), _stub(error, {}), lambda s: None).extract("abc")
-        == "blocked"
-    )
-
-
-@pytest.mark.parametrize(
-    ("status", "expected"),
-    [(429, "blocked"), (403, "blocked"), (404, "unavailable"), (None, "unavailable")],
-)
-def test_ytdlp_subtitle_fetch_error_is_mapped(
-    status: int | None, expected: str
-) -> None:
-    info = {"duration": 3, "subtitles": {"en": [{"ext": "vtt", "url": "u"}]}}
-    stub = _stub(info, {}, _RequestError(status))
-    assert YtDlpExtractor((0, 0), stub, lambda s: None).extract("abc") == expected
-
-
-def test_ytdlp_too_many_requests_is_blocked() -> None:
-    error = _DownloadError("HTTP Error 429: Too Many Requests")
-    assert (
-        YtDlpExtractor((0, 0), _stub(error, {}), lambda s: None).extract("abc")
+        YtDlpExtractor((0, 0), _stub(error, {}), lambda s: None).extract("abc", LANGS)
         == "blocked"
     )
 
@@ -200,7 +209,9 @@ def test_ytdlp_too_many_requests_is_blocked() -> None:
 def test_delay_range_reaches_sleep() -> None:
     info = {"duration": 3, "subtitles": {"en": [{"ext": "vtt", "url": "u"}]}}
     delays: list[float] = []
-    YtDlpExtractor(parse_delay("1-1"), _stub(info, {}), delays.append).extract("abc")
+    YtDlpExtractor(parse_delay("1-1"), _stub(info, {}), delays.append).extract(
+        "abc", LANGS
+    )
     assert delays == [1.0, 1.0]
     extractor = make_extractor({"YT_DELAY_SECONDS": "7"})
     assert isinstance(extractor, YtDlpExtractor)

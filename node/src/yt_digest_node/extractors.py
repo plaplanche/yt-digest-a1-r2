@@ -27,7 +27,7 @@ class Extraction:
 
 
 class Extractor:
-    def extract(self, video_id: str) -> Extraction | Failure:
+    def extract(self, video_id: str, langs: Sequence[str]) -> Extraction | Failure:
         raise NotImplementedError
 
 
@@ -35,7 +35,7 @@ class FakeExtractor(Extractor):
     def __init__(self, root: Path) -> None:
         self._root = root
 
-    def extract(self, video_id: str) -> Extraction | Failure:
+    def extract(self, video_id: str, langs: Sequence[str]) -> Extraction | Failure:
         directory = self._root / video_id
         if not directory.is_dir():
             return "unavailable"
@@ -77,7 +77,7 @@ class YtDlpExtractor(Extractor):
     def _wait(self) -> None:
         self._sleep(random.uniform(*self._delay))
 
-    def extract(self, video_id: str) -> Extraction | Failure:
+    def extract(self, video_id: str, langs: Sequence[str]) -> Extraction | Failure:
         options = {
             "skip_download": True,
             "writesubtitles": True,
@@ -92,29 +92,48 @@ class YtDlpExtractor(Extractor):
                 info = ydl.extract_info(
                     f"https://www.youtube.com/watch?v={video_id}", download=False
                 )
-                tracks: list[Track] = []
-                sources: list[tuple[str, TrackKind]] = [
-                    ("subtitles", "manual"),
-                    ("automatic_captions", "auto"),
+                duration = float(info.get("duration") or 0)
+                manual = _vtt_urls(info.get("subtitles") or {})
+                auto = _original_captions(info.get("automatic_captions") or {})
+                sources: list[tuple[TrackKind, dict[str, str]]] = [
+                    ("manual", manual),
+                    ("auto", _vtt_urls(auto)),
                 ]
-                for field, kind in sources:
-                    for lang, formats in (info.get(field) or {}).items():
-                        for item in formats:
-                            if item.get("ext") == "vtt":
-                                self._wait()
-                                body = ydl.urlopen(item["url"]).read()
-                                tracks.append(Track(lang, kind, body.decode("utf-8")))
-                                break
-                return Extraction(float(info.get("duration") or 0), tracks)
-        except self._yt_dlp.networking.exceptions.RequestError as error:
-            if getattr(error, "status", None) in (403, 429):
-                return "blocked"
-            return "unavailable"
+                for kind, urls in sources:
+                    for lang in langs:
+                        if lang in urls:
+                            self._wait()
+                            body = ydl.urlopen(urls[lang]).read()
+                            text = body.decode("utf-8", errors="replace")
+                            return Extraction(duration, [Track(lang, kind, text)])
+                return Extraction(duration, [])
         except self._yt_dlp.utils.DownloadError as error:
-            message = str(error)
-            if "not a bot" in message or "Too Many Requests" in message:
+            if "not a bot" in str(error):
                 return "blocked"
             return "unavailable"
+
+
+def _vtt_urls(tracks: dict[str, list[dict[str, str]]]) -> dict[str, str]:
+    urls: dict[str, str] = {}
+    for lang, formats in tracks.items():
+        for item in formats:
+            if item.get("ext") == "vtt":
+                urls[lang] = item["url"]
+                break
+    return urls
+
+
+def _original_captions(
+    tracks: dict[str, list[dict[str, str]]],
+) -> dict[str, list[dict[str, str]]]:
+    # yt-dlp lists machine translations under plain language keys and the
+    # spoken language as `<lang>-orig`; when it is there, only it is used.
+    originals = {
+        lang.removesuffix("-orig"): formats
+        for lang, formats in tracks.items()
+        if lang.endswith("-orig")
+    }
+    return originals or tracks
 
 
 def make_extractor(environ: dict[str, str] | None = None) -> Extractor:
