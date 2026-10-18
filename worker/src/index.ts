@@ -83,7 +83,7 @@ async function enqueueJobs(request: Request, env: Env): Promise<Response> {
   if (!Array.isArray(requested) || requested.length < 1 || requested.length > 100) return invalid();
   if (!requested.every((v): v is string => typeof v === "string" && VIDEO_ID.test(v))) return invalid();
   const video_ids = [...new Set(requested)];
-  if (typeof priority !== "number" || !Number.isInteger(priority) || priority < 0) return invalid();
+  if (typeof priority !== "number" || !Number.isSafeInteger(priority) || priority < 0) return invalid();
   const now = new Date().toISOString();
   const statements = video_ids.flatMap((id) => [
     env.DB.prepare("INSERT OR IGNORE INTO jobs (video_id, kind, priority, status, created_at) VALUES (?, 'primary', ?, 'queued', ?)").bind(id, priority, now),

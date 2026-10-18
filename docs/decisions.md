@@ -43,3 +43,6 @@
 - 2026-10-18: a video id repeated in one `POST /ops/jobs` request is deduplicated (first occurrence kept), so it appears once in `enqueued` or `existing`.
 - 2026-10-18: the expiry sweep (8.6) comes with the next ticket, so claims and `GET /ops/jobs/<video_id>` do not run it yet.
 - 2026-10-18: the Worker log writes each event with `console.log` (workerd has no `process`), which wrangler sends to its output and so to `.stack/logs/worker.log`.
+- 2026-10-18: a retried `POST /node/claim` is a new claim (the claim schema has no idempotency key), so a lost response leaves leases that only the expiry sweep of the next ticket recovers; heartbeats are idempotent.
+- 2026-10-18: `LEASE_SECONDS` is used when it is a positive number (fractions allowed); any other value silently falls back to 600.
+- 2026-10-18: the `/ops/nodes` and `/ops/jobs` bodies reject unknown keys with 400; a `priority` must be a non-negative safe integer (above 2^53 - 1 gives 400, not a D1 bind failure).
