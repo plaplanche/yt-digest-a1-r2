@@ -29,6 +29,8 @@ def _parser() -> argparse.ArgumentParser:
     transcript.add_argument("video_id", type=_video_id)
     transcript.add_argument("--langs")
     transcript.add_argument("--request-id")
+    work = commands.add_parser("work")
+    work.add_argument("--once", action="store_true")
     return parser
 
 
@@ -107,12 +109,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     env = dict(os.environ)
     raw_langs = (
-        args.langs if args.langs is not None else env.get("TRANSCRIPT_LANGS", "fr,en")
+        args.langs
+        if getattr(args, "langs", None) is not None
+        else env.get("TRANSCRIPT_LANGS", "fr,en")
     )
     langs = [lang.strip() for lang in raw_langs.split(",") if lang.strip()]
     if not langs:
         print("yt-digest-node: no language given", file=sys.stderr)
         return 2
+    if args.command == "work":
+        from yt_digest_node.daemon import work
+
+        return work(args.once, langs, env)
     emit("service.started", attrs={"version": version("yt-digest-node")})
     try:
         result = run(args.video_id, langs, args.request_id, env)
