@@ -4,6 +4,8 @@ import { log } from "./log";
 export interface OAuthEnv {
   DB: D1Database;
   PUBLIC_URL?: string;
+  ACCESS_TOKEN_TTL_SECONDS?: string;
+  REFRESH_TOKEN_TTL_SECONDS?: string;
   AUTH_CODE_TTL_SECONDS?: string;
   AUTH_REQUEST_TTL_SECONDS?: string;
   GOOGLE_ISSUER?: string;
@@ -18,17 +20,17 @@ const GOOGLE_SCOPE = "openid email https://www.googleapis.com/auth/youtube.reado
 const MAX_REDIRECT_URIS = 10;
 const MAX_CLIENT_NAME = 200;
 
-const base = (env: OAuthEnv, request: Request): string => (env.PUBLIC_URL ?? new URL(request.url).origin).replace(/\/+$/, "");
+export const base = (env: OAuthEnv, request: Request): string => (env.PUBLIC_URL ?? new URL(request.url).origin).replace(/\/+$/, "");
 
-function ttlMs(value: string | undefined, fallbackSeconds: number): number {
+export function ttlMs(value: string | undefined, fallbackSeconds: number): number {
   const n = Number(value);
   return (value !== undefined && value !== "" && Number.isFinite(n) && n > 0 ? n : fallbackSeconds) * 1000;
 }
 
-const b64url = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-const randomToken = (bytes = 32): string => b64url(crypto.getRandomValues(new Uint8Array(bytes)));
+export const b64url = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+export const randomToken = (bytes = 32): string => b64url(crypto.getRandomValues(new Uint8Array(bytes)));
 
-function oauthJson(body: unknown, status = 200): Response {
+export function oauthJson(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
