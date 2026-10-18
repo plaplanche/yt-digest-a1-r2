@@ -116,6 +116,28 @@ async function showTranscript(env: Env, videoId: string): Promise<Response> {
   return json({ video_id: videoId, transcript: JSON.parse(await object.text()) as unknown, node_id, lease_id, produced_at });
 }
 
+async function inviteUser(request: Request, env: Env, revoke: boolean): Promise<Response> {
+  const body = await readJson(request);
+  if (body === undefined || Object.keys(body).some((k) => k !== "email")) return invalid();
+  const { email: raw } = body;
+  if (typeof raw !== "string" || !raw.includes("@")) return invalid();
+  const email = raw.toLowerCase();
+  if (revoke) {
+    const updated = await env.DB.prepare("UPDATE invites SET revoked = 1 WHERE email = ?").bind(email).run();
+    if (updated.meta.changes === 0) return notFound();
+    return json({ email, revoked: true });
+  }
+  await env.DB.prepare("INSERT INTO invites (email, invited_at) VALUES (?, ?) ON CONFLICT(email) DO UPDATE SET revoked = 0")
+    .bind(email, new Date().toISOString())
+    .run();
+  return json({ email, revoked: false });
+}
+
+async function listUsers(env: Env): Promise<Response> {
+  const { results } = await env.DB.prepare("SELECT user_sub, email, role FROM users ORDER BY email").all();
+  return json({ users: results });
+}
+
 async function reset(env: Env): Promise<Response> {
   await env.DB.batch(TABLES.map((table) => env.DB.prepare(`DELETE FROM ${table}`)));
   let cursor: string | undefined;
@@ -135,6 +157,9 @@ async function handleOps(request: Request, env: Env, path: string): Promise<Resp
   if (request.method === "POST" && path === "/ops/reset") return reset(env);
   if (request.method === "POST" && path === "/ops/nodes") return enrollNode(request, env);
   if (request.method === "POST" && path === "/ops/jobs") return enqueueJobs(request, env);
+  if (request.method === "POST" && path === "/ops/invites") return inviteUser(request, env, false);
+  if (request.method === "POST" && path === "/ops/invites/revoke") return inviteUser(request, env, true);
+  if (request.method === "GET" && path === "/ops/users") return listUsers(env);
   const job = /^\/ops\/jobs\/([^/]+)$/.exec(path);
   if (request.method === "GET" && job?.[1] !== undefined) return showJob(env, job[1]);
   const transcript = /^\/ops\/transcripts\/([^/]+)$/.exec(path);
