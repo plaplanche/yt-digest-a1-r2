@@ -203,3 +203,50 @@ describe("POST /node/claim", () => {
     expect(leases?.c).toBe(7);
   });
 });
+
+describe("invites and users", () => {
+  const rows = async (): Promise<{ email: string; revoked: number }[]> =>
+    (await env.DB.prepare("SELECT email, revoked FROM invites ORDER BY email").all<{ email: string; revoked: number }>()).results;
+
+  test("an invite is stored lowercased", async () => {
+    const res = await ops("/ops/invites", { email: "Bob@Test" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ email: "bob@test", revoked: false });
+    expect(await rows()).toEqual([{ email: "bob@test", revoked: 0 }]);
+  });
+
+  test("inviting again re-activates a revoked invite", async () => {
+    await ops("/ops/invites", { email: "bob@test" });
+    const revoked = await ops("/ops/invites/revoke", { email: "BOB@test" });
+    expect(await revoked.json()).toEqual({ email: "bob@test", revoked: true });
+    expect(await rows()).toEqual([{ email: "bob@test", revoked: 1 }]);
+    const again = await ops("/ops/invites", { email: "bob@test" });
+    expect(await again.json()).toEqual({ email: "bob@test", revoked: false });
+    expect(await rows()).toEqual([{ email: "bob@test", revoked: 0 }]);
+  });
+
+  test("revoking an unknown invite gives 404 not_found", async () => {
+    const res = await ops("/ops/invites/revoke", { email: "nobody@test" });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: { code: "not_found" } });
+  });
+
+  test("an invalid e-mail gives 400", async () => {
+    expect((await ops("/ops/invites", { email: "nope" })).status).toBe(400);
+    expect((await ops("/ops/invites/revoke", {})).status).toBe(400);
+  });
+
+  test("GET /ops/users lists users sorted by e-mail", async () => {
+    for (const [sub, email, role] of [["g-2", "bob@test", "member"], ["g-1", "alice@test", "admin"]]) {
+      await env.DB.prepare("INSERT INTO users (user_sub, email, role, created_at) VALUES (?, ?, ?, 'now')").bind(sub, email, role).run();
+    }
+    const res = await ops("/ops/users", undefined, "GET");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      users: [
+        { user_sub: "g-1", email: "alice@test", role: "admin" },
+        { user_sub: "g-2", email: "bob@test", role: "member" },
+      ],
+    });
+  });
+});
