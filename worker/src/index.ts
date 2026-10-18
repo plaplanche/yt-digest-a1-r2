@@ -2,11 +2,12 @@ import pkg from "../package.json";
 import { errorResponse, json, sha256, sha256Hex } from "./http";
 import { log } from "./log";
 import { revokeNode, sweepExpired } from "./leases";
+import { handleMcp, type McpEnv } from "./mcp";
 import { handleNode } from "./node";
 import { authorizationServer, authorize, callback, consent, protectedResource, register, type OAuthEnv } from "./oauth";
 import { token } from "./token";
 
-export interface Env extends OAuthEnv {
+export interface Env extends OAuthEnv, McpEnv {
   DB: D1Database;
   TRANSCRIPTS: R2Bucket;
   OPS_TOKEN?: string;
@@ -176,6 +177,7 @@ export default {
     const { pathname } = new URL(request.url);
     if (pathname === "/ops" || pathname.startsWith("/ops/")) return handleOps(request, env, pathname);
     if (pathname.startsWith("/node/")) return handleNode(request, env, pathname);
+    if (request.method === "POST" && pathname === "/mcp") return handleMcp(request, env);
     const get = request.method === "GET";
     if (get && (pathname === "/.well-known/oauth-protected-resource" || pathname === "/.well-known/oauth-protected-resource/mcp")) {
       return protectedResource(env, request);
