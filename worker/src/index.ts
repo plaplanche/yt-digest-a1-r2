@@ -3,12 +3,21 @@ import { errorResponse, json, sha256, sha256Hex } from "./http";
 import { log } from "./log";
 import { revokeNode, sweepExpired } from "./leases";
 import { handleNode } from "./node";
+import { handleOauth } from "./oauth";
 
 export interface Env {
   DB: D1Database;
   TRANSCRIPTS: R2Bucket;
   OPS_TOKEN?: string;
   LEASE_SECONDS?: string;
+  PUBLIC_URL?: string;
+  AUTH_CODE_TTL_SECONDS?: string;
+  AUTH_REQUEST_TTL_SECONDS?: string;
+  GOOGLE_ISSUER?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  ADMIN_EMAIL?: string;
+  TOKEN_ENC_KEY?: string;
 }
 
 // Every table of the D1 schema (spec lot 2, section 6.3).
@@ -175,6 +184,8 @@ export default {
     if (pathname === "/ops" || pathname.startsWith("/ops/")) return handleOps(request, env, pathname);
     if (pathname.startsWith("/node/")) return handleNode(request, env, pathname);
     if (request.method === "GET" && pathname === "/health") return json({ status: "ok", version: pkg.version });
+    const oauth = await handleOauth(request, env, pathname);
+    if (oauth !== undefined) return oauth;
     return notFound();
   },
 } satisfies ExportedHandler<Env>;
