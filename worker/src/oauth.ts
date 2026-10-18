@@ -37,7 +37,10 @@ const escapeHtml = (text: string): string =>
 
 function page(status: number, title: string, body: string): Response {
   const html = `<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head><body>${body}</body></html>`;
-  return new Response(html, { status, headers: { "Content-Type": "text/html; charset=utf-8" } });
+  return new Response(html, {
+    status,
+    headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "frame-ancestors 'none'", "X-Frame-Options": "DENY" },
+  });
 }
 
 const errorPage = (message: string): Response => page(400, "Error", `<h1>Error</h1><p>${escapeHtml(message)}</p>`);
@@ -96,7 +99,7 @@ export async function register(request: Request, env: OAuthEnv): Promise<Respons
   try {
     body = await request.json();
   } catch {
-    body = undefined;
+    return oauthJson({ error: "invalid_request" }, 400);
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) return oauthJson({ error: "invalid_client_metadata" }, 400);
   const meta = body as Record<string, unknown>;
@@ -291,6 +294,8 @@ async function verifyIdToken(token: string, jwksUri: string, env: OAuthEnv, nonc
   const claims = decode(p) as IdClaims;
   const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
   if (
+    !env.GOOGLE_ISSUER ||
+    !env.GOOGLE_CLIENT_ID ||
     claims.iss !== env.GOOGLE_ISSUER ||
     !aud.includes(env.GOOGLE_CLIENT_ID) ||
     typeof claims.exp !== "number" ||
@@ -381,15 +386,23 @@ export async function callback(request: Request, env: OAuthEnv): Promise<Respons
   }
   const role = isAdmin ? "admin" : "member";
 
-  const encrypted = googleRefresh === null ? null : await encrypt(googleRefresh, env.TOKEN_ENC_KEY ?? "");
+  let encrypted: string | null;
+  try {
+    encrypted = googleRefresh === null ? null : await encrypt(googleRefresh, env.TOKEN_ENC_KEY ?? "");
+  } catch {
+    log("auth.oauth.denied", { level: "error", attrs: { client_id: pending.client_id, reason: "server_error" } });
+    return toClient("server_error");
+  }
   const authCode = randomToken(32);
-  await env.DB.batch([
+  // Admission is part of each statement, so a revocation landing after the check above cannot be missed.
+  const admitted = "(? = 1 OR EXISTS (SELECT 1 FROM invites WHERE email = ? AND revoked = 0))";
+  const results = await env.DB.batch([
     env.DB.prepare(
-      "INSERT INTO users (user_sub, email, role, google_refresh_token_enc, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_sub) DO UPDATE SET email = excluded.email, role = excluded.role, google_refresh_token_enc = COALESCE(excluded.google_refresh_token_enc, google_refresh_token_enc)",
-    ).bind(sub, email, role, encrypted, nowIso),
-    env.DB.prepare("UPDATE invites SET accepted_user_sub = ? WHERE email = ?").bind(sub, email),
+      `INSERT INTO users (user_sub, email, role, google_refresh_token_enc, created_at) SELECT ?, ?, ?, ?, ? WHERE ${admitted} ON CONFLICT(user_sub) DO UPDATE SET email = excluded.email, role = excluded.role, google_refresh_token_enc = COALESCE(excluded.google_refresh_token_enc, google_refresh_token_enc)`,
+    ).bind(sub, email, role, encrypted, nowIso, isAdmin ? 1 : 0, email),
+    env.DB.prepare("UPDATE invites SET accepted_user_sub = ? WHERE email = ? AND revoked = 0").bind(sub, email),
     env.DB.prepare(
-      "INSERT INTO oauth_codes (code_hash, client_id, user_sub, redirect_uri, code_challenge, scope, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      `INSERT INTO oauth_codes (code_hash, client_id, user_sub, redirect_uri, code_challenge, scope, resource, expires_at) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${admitted}`,
     ).bind(
       await sha256Hex(authCode),
       pending.client_id,
@@ -399,8 +412,14 @@ export async function callback(request: Request, env: OAuthEnv): Promise<Respons
       pending.scope,
       pending.resource,
       new Date(Date.now() + ttlMs(env.AUTH_CODE_TTL_SECONDS, 60)).toISOString(),
+      isAdmin ? 1 : 0,
+      email,
     ),
   ]);
+  if (results[2]?.meta.changes === 0) {
+    log("auth.oauth.denied", { attrs: { client_id: pending.client_id, reason: "not_invited" } });
+    return refusal();
+  }
   log("auth.oauth.completed", { attrs: { client_id: pending.client_id, role } });
   return redirectTo(pending.redirect_uri, { code: authCode, state: pending.client_state });
 }

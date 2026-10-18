@@ -3,14 +3,13 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 const opsToken = process.env.OPS_TOKEN ?? "ops-local";
 const ops = { Authorization: `Bearer ${opsToken}` };
 const workerUrl = `http://127.0.0.1:${process.env.WORKER_PORT ?? "8787"}`;
-// Nothing listens here: the browser is stopped at the redirect by a route, so the test reads the URL
-// without Chromium navigating to an error page.
-const redirectUri = "http://127.0.0.1:9/cb";
-const redirected = /^http:\/\/127\.0\.0\.1:9\/cb\?/;
+// A path on the Worker itself: its port is one Chromium allows and the final navigation loads (a 404
+// page) instead of ending on an error page.
+const redirectUri = `${workerUrl}/cb`;
+const redirected = new RegExp(`^${workerUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/cb\\?`);
 
-test.beforeEach(async ({ request, page }) => {
+test.beforeEach(async ({ request }) => {
   expect((await request.post("/ops/reset", { headers: ops })).status()).toBe(200);
-  await page.route(redirected, (route) => route.fulfill({ status: 200, contentType: "text/plain", body: "client" }));
 });
 
 async function startAuthorization(page: Page, request: APIRequestContext): Promise<void> {

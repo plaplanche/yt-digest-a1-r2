@@ -208,7 +208,13 @@ describe("POST /register (10.2)", () => {
       expect(res.status, JSON.stringify(extra)).toBe(400);
       expect(await res.json()).toMatchObject({ error: "invalid_client_metadata" });
     }
-    expect((await call("/register", { method: "POST", body: "not json" })).status).toBe(400);
+    const unparseable = await call("/register", { method: "POST", body: "not json" });
+    expect(unparseable.status).toBe(400);
+    expect(await unparseable.json()).toMatchObject({ error: "invalid_request" });
+    const notObject = await post("/register", [1]);
+    expect(await notObject.json()).toMatchObject({ error: "invalid_client_metadata" });
+    const both = await post("/register", { redirect_uris: [], client_name: 5 });
+    expect(await both.json()).toMatchObject({ error: "invalid_redirect_uri" });
     expect((await post("/register", { redirect_uris: [REDIRECT], client_name: "x".repeat(200), grant_types: ["refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" })).status).toBe(201);
   });
 });
@@ -455,6 +461,32 @@ describe("GET /callback (10.4)", () => {
       expect(target.searchParams.has("code")).toBe(false);
     }
     expect((await env.DB.prepare("SELECT count(*) AS n FROM users").first<{ n: number }>())?.n).toBe(0);
+  });
+
+  test("a bad encryption key after the request is used up redirects with server_error", async () => {
+    const id = await registerClient();
+    const google = await approve(id);
+    tokenResponse = async () =>
+      Response.json({ refresh_token: "r", id_token: await idToken(claimsFor("alice@test", { nonce: google.searchParams.get("nonce") ?? "" })) });
+    const res = await worker.fetch(new Request(`${BASE}/callback?code=c&state=${google.searchParams.get("state")}`), { ...bindings, TOKEN_ENC_KEY: "bad" });
+    expect(res.status).toBe(302);
+    expect(location(res).searchParams.get("error")).toBe("server_error");
+    expect((await env.DB.prepare("SELECT count(*) AS n FROM users").first<{ n: number }>())?.n).toBe(0);
+  });
+
+  test("an unset GOOGLE_CLIENT_ID refuses a token without aud", async () => {
+    const id = await registerClient();
+    const google = await approve(id);
+    tokenResponse = async () =>
+      Response.json({ id_token: await idToken(claimsFor("alice@test", { nonce: google.searchParams.get("nonce") ?? "", aud: undefined })) });
+    const res = await worker.fetch(new Request(`${BASE}/callback?code=c&state=${google.searchParams.get("state")}`), { ...bindings, GOOGLE_CLIENT_ID: undefined });
+    expect(location(res).searchParams.get("error")).toBe("server_error");
+  });
+
+  test("the consent page cannot be framed", async () => {
+    const id = await registerClient();
+    const res = await call(`/authorize?${new URLSearchParams({ response_type: "code", client_id: id, redirect_uri: REDIRECT, code_challenge: "c", code_challenge_method: "S256", resource: `${BASE}/mcp` })}`);
+    expect(res.headers.get("Content-Security-Policy")).toBe("frame-ancestors 'none'");
   });
 
   test("a token endpoint failure or a missing code is server_error", async () => {
