@@ -84,6 +84,40 @@ describe("POST /node/result", () => {
     expect(await (await env.TRANSCRIPTS.get(`transcripts/${VIDEO}.json`))?.text()).toBe("{}");
   });
 
+  test("an object that appears between the check and the write is not overwritten", async () => {
+    const { a } = (await setup(["a"])) as { a: string };
+    const [lease] = await claim(a);
+    const racing = {
+      ...env.TRANSCRIPTS,
+      put: async (key: string, value: string, options: R2PutOptions) => {
+        await env.TRANSCRIPTS.put(key, "{}");
+        return env.TRANSCRIPTS.put(key, value, options);
+      },
+    } as unknown as R2Bucket;
+    const request = new Request("http://worker.test/node/result", {
+      method: "POST", headers: { Authorization: `Bearer ${a}` }, body: JSON.stringify({ lease_id: lease?.lease_id, outcome: "ok", transcript: transcript() }),
+    });
+    expect((await worker.fetch(request, { ...bindings, TRANSCRIPTS: racing })).status).toBe(200);
+    expect(await (await env.TRANSCRIPTS.get(`transcripts/${VIDEO}.json`))?.text()).toBe("{}");
+  });
+
+  test("a claim that races with a revocation leases nothing", async () => {
+    const { a } = (await setup(["a"])) as { a: string };
+    const racing = {
+      prepare: (sql: string) => env.DB.prepare(sql),
+      batch: async (statements: D1PreparedStatement[]) => {
+        await env.DB.prepare("UPDATE nodes SET state = 'disabled', revoked_at = 't' WHERE node_id = 'a'").run();
+        return env.DB.batch(statements);
+      },
+    } as unknown as D1Database;
+    const request = new Request("http://worker.test/node/claim", {
+      method: "POST", headers: { Authorization: `Bearer ${a}` }, body: JSON.stringify({ max_jobs: 1 }),
+    });
+    await worker.fetch(request, { ...bindings, DB: racing });
+    expect(await job()).toMatchObject({ status: "queued" });
+    expect(await count("SELECT COUNT(*) AS c FROM leases")).toBe(0);
+  });
+
   test("the marker is not a word", async () => {
     const { a } = (await setup(["a"])) as { a: string };
     const [lease] = await claim(a);

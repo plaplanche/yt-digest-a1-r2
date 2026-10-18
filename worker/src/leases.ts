@@ -58,6 +58,8 @@ interface EndedLease {
   job: "done" | "fail";
   /** The node event kind recorded against the node, if any. */
   event?: string;
+  /** A result also needs the lease to be unexpired on the Worker's clock at the moment of the write. */
+  unexpired?: boolean;
 }
 
 // Ends a lease and updates its job in one D1 batch. Both writes are conditional on the lease still
@@ -68,14 +70,14 @@ async function endLease(env: Env, end: EndedLease): Promise<{ status: NodeJobAck
   const cleared = "leased_by = NULL, lease_id = NULL, lease_expires_at = NULL";
   const jobUpdate =
     end.job === "done"
-      ? env.DB.prepare(`UPDATE jobs SET status = 'done', done_at = ?1, last_outcome = ?2, ${cleared} WHERE video_id = ?3 AND kind = 'primary' AND status = 'leased' AND lease_id = ?4`)
+      ? env.DB.prepare(`UPDATE jobs SET status = 'done', done_at = ?1, last_outcome = ?2, ${cleared} WHERE video_id = ?3 AND kind = 'primary' AND status = 'leased' AND lease_id = ?4 AND (?5 IS NULL OR lease_expires_at > ?5)`)
       : env.DB.prepare(
           `UPDATE jobs SET status = CASE WHEN attempts >= ${MAX_ATTEMPTS} THEN 'failed_video' ELSE 'queued' END,
              done_at = CASE WHEN attempts >= ${MAX_ATTEMPTS} THEN ?1 ELSE NULL END, last_outcome = ?2, ${cleared}
-           WHERE video_id = ?3 AND kind = 'primary' AND status = 'leased' AND lease_id = ?4`,
+           WHERE video_id = ?3 AND kind = 'primary' AND status = 'leased' AND lease_id = ?4 AND (?5 IS NULL OR lease_expires_at > ?5)`,
         );
   const statements = [
-    jobUpdate.bind(now, end.lastOutcome, end.videoId, end.leaseId),
+    jobUpdate.bind(now, end.lastOutcome, end.videoId, end.leaseId, end.unexpired === true ? now : null),
     env.DB.prepare(
       `UPDATE leases SET state = ?1,
          response_json = (SELECT json_object('video_id', video_id, 'status', status) FROM jobs WHERE video_id = ?2 AND kind = 'primary')
@@ -159,7 +161,7 @@ export async function handleResult(env: Env, nodeId: string, body: NodeResultReq
   const reason = validationFailure(body, videoId);
   if (reason !== undefined) {
     const ended = await endLease(env, {
-      leaseId: body.lease_id, videoId, nodeId, leaseState: "rejected", lastOutcome: "validation_failed", job: "fail", event: "validation_failed",
+      leaseId: body.lease_id, videoId, nodeId, leaseState: "rejected", lastOutcome: "validation_failed", job: "fail", event: "validation_failed", unexpired: true,
     });
     if (ended === undefined) return stale(nodeId, videoId);
     log("job.validation_failed", { level: "warn", video_id: videoId, attrs: { node_id: nodeId, reason } });
@@ -169,12 +171,12 @@ export async function handleResult(env: Env, nodeId: string, body: NodeResultReq
   if (body.outcome === "ok") {
     const key = `transcripts/${videoId}.json`;
     try {
-      if ((await env.TRANSCRIPTS.head(key)) === null) {
-        await env.TRANSCRIPTS.put(key, JSON.stringify(body.transcript), {
-          httpMetadata: { contentType: "application/json" },
-          customMetadata: { node_id: nodeId, lease_id: body.lease_id, produced_at: new Date().toISOString() },
-        });
-      }
+      // Conditional put: null means the object already exists, which is kept as it is.
+      await env.TRANSCRIPTS.put(key, JSON.stringify(body.transcript), {
+        httpMetadata: { contentType: "application/json" },
+        customMetadata: { node_id: nodeId, lease_id: body.lease_id, produced_at: new Date().toISOString() },
+        onlyIf: { etagDoesNotMatch: "*" },
+      });
     } catch {
       return errorResponse(503, "storage_error", "The transcript could not be stored");
     }
@@ -182,7 +184,7 @@ export async function handleResult(env: Env, nodeId: string, body: NodeResultReq
 
   const failing = body.outcome === "unavailable" || body.outcome === "blocked" || body.outcome === "error";
   const ended = await endLease(env, {
-    leaseId: body.lease_id, videoId, nodeId, leaseState: "completed", lastOutcome: body.outcome, job: failing ? "fail" : "done", event: `job_${body.outcome}`,
+    leaseId: body.lease_id, videoId, nodeId, leaseState: "completed", lastOutcome: body.outcome, job: failing ? "fail" : "done", event: `job_${body.outcome}`, unexpired: true,
   });
   if (ended === undefined) {
     // Lost a race with the sweep, a revocation or a retry of this very result.

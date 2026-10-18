@@ -114,7 +114,7 @@ async function claim(env: Env, nodeId: string, maxJobs: number): Promise<Respons
     env.DB.prepare(
       `UPDATE jobs SET status = 'leased', leased_by = ?1, lease_id = ?2 || '.' || video_id, lease_expires_at = ?3,
          attempts = attempts + 1, tried_nodes = json_insert(tried_nodes, '$[#]', ?1)
-       WHERE status = 'queued' AND rowid IN (
+       WHERE status = 'queued' AND EXISTS (SELECT 1 FROM nodes WHERE node_id = ?1 AND revoked_at IS NULL) AND rowid IN (
          SELECT rowid FROM jobs
          WHERE status = 'queued' AND NOT EXISTS (SELECT 1 FROM json_each(jobs.tried_nodes) WHERE value = ?1)
          ORDER BY priority DESC, created_at ASC, video_id ASC LIMIT ?4)`,
