@@ -118,6 +118,11 @@ describe("POST /ops/jobs", () => {
     expect(await job(vid(3))).toMatchObject({ kind: "primary", status: "queued", attempts: 0, tried_nodes: [], leased_by: null, done_at: null });
   });
 
+  test("a video id repeated in one request is listed once", async () => {
+    const res = await ops("/ops/jobs", { video_ids: [vid(7), vid(7)] });
+    expect(await res.json()).toEqual({ enqueued: [vid(7)], existing: [] });
+  });
+
   test("400 on a bad body, 404 on an unknown job", async () => {
     for (const body of [{}, { video_ids: [] }, { video_ids: ["short"] }, { video_ids: [vid(1)], priority: -1 }, { video_ids: Array(101).fill(vid(1)) }]) {
       expect((await ops("/ops/jobs", body)).status).toBe(400);
