@@ -99,9 +99,9 @@ export async function register(request: Request, env: Env): Promise<Response> {
   try {
     body = await request.json();
   } catch {
-    return oauthError(400, "invalid_client_metadata", "The body is not JSON");
+    return oauthError(400, "invalid_request", "The body is not JSON");
   }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return oauthError(400, "invalid_client_metadata", "The body is not an object");
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return oauthError(400, "invalid_request", "The body is not an object");
   const meta = body as Record<string, unknown>;
   const uris = meta.redirect_uris;
   if (!Array.isArray(uris) || uris.length < 1 || uris.length > 10 || !uris.every(validRedirectUri)) {
@@ -192,6 +192,11 @@ export async function consent(request: Request, env: Env): Promise<Response> {
   if (typeof id !== "string" || (decision !== "approve" && decision !== "deny")) return errorPage("Invalid request.");
   const now = new Date().toISOString();
   const state = randomToken();
+  // Fetched before the request is bound, so a failed fetch leaves the approve retryable.
+  const metadata =
+    decision === "approve"
+      ? await fetchJson<{ authorization_endpoint: string }>(`${setting(env.GOOGLE_ISSUER, "GOOGLE_ISSUER")}/.well-known/openid-configuration`)
+      : undefined;
   const pending =
     decision === "deny"
       ? await env.DB.prepare("UPDATE oauth_requests SET used_at = ? WHERE request_id = ? AND used_at IS NULL AND expires_at > ? RETURNING *").bind(now, id, now).first<Pending>()
@@ -206,8 +211,7 @@ export async function consent(request: Request, env: Env): Promise<Response> {
     return redirect(pending.redirect_uri, { error: "access_denied", state: pending.client_state ?? undefined });
   }
   const nonce = (pending as Pending & { google_nonce: string }).google_nonce;
-  const metadata = await fetchJson<{ authorization_endpoint: string }>(`${setting(env.GOOGLE_ISSUER, "GOOGLE_ISSUER")}/.well-known/openid-configuration`);
-  return redirect(metadata.authorization_endpoint, {
+  return redirect((metadata as { authorization_endpoint: string }).authorization_endpoint, {
     client_id: env.GOOGLE_CLIENT_ID ?? "yt-digest-local",
     redirect_uri: `${base(env, request)}/callback`,
     response_type: "code",
@@ -297,28 +301,29 @@ export async function callback(request: Request, env: Env): Promise<Response> {
 
   const email = claims.email.toLowerCase();
   const isAdmin = email === (env.ADMIN_EMAIL ?? "alice@test").toLowerCase();
-  const invite = isAdmin ? null : await env.DB.prepare("SELECT 1 AS ok FROM invites WHERE email = ? AND revoked = 0").bind(email).first();
   if (claims.email_verified !== true) {
     log("auth.oauth.denied", { level: "warn", attrs: { client_id: pending.client_id, reason: "email_unverified" } });
-    return refusal();
-  }
-  if (!isAdmin && invite === null) {
-    log("auth.oauth.denied", { level: "warn", attrs: { client_id: pending.client_id, reason: "not_invited" } });
     return refusal();
   }
   const role = isAdmin ? "admin" : "member";
   const encrypted = googleRefresh === undefined ? null : await encrypt(googleRefresh, env.TOKEN_ENC_KEY ?? "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
   const code = randomToken();
-  await env.DB.batch([
+  // The admission is part of the writes themselves, so a concurrent revoke cannot slip in between.
+  const admitted = "(? OR EXISTS (SELECT 1 FROM invites WHERE email = ? AND revoked = 0))";
+  const results = await env.DB.batch([
     env.DB.prepare(
-      "INSERT INTO users (user_sub, email, role, google_refresh_token_enc, created_at) VALUES (?, ?, ?, ?, ?) " +
+      `INSERT INTO users (user_sub, email, role, google_refresh_token_enc, created_at) SELECT ?, ?, ?, ?, ? WHERE ${admitted} ` +
         "ON CONFLICT(user_sub) DO UPDATE SET email = excluded.email, role = excluded.role, google_refresh_token_enc = COALESCE(excluded.google_refresh_token_enc, google_refresh_token_enc)",
-    ).bind(claims.sub, email, role, encrypted, now),
+    ).bind(claims.sub, email, role, encrypted, now, isAdmin ? 1 : 0, email),
     env.DB.prepare("UPDATE invites SET accepted_user_sub = ? WHERE email = ? AND revoked = 0").bind(claims.sub, email),
     env.DB.prepare(
-      "INSERT INTO oauth_codes (code_hash, client_id, user_sub, redirect_uri, code_challenge, scope, resource, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(await sha256Hex(code), pending.client_id, claims.sub, pending.redirect_uri, pending.code_challenge, pending.scope, pending.resource, after(seconds(env.AUTH_CODE_TTL_SECONDS, 60))),
+      `INSERT INTO oauth_codes (code_hash, client_id, user_sub, redirect_uri, code_challenge, scope, resource, expires_at) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${admitted}`,
+    ).bind(await sha256Hex(code), pending.client_id, claims.sub, pending.redirect_uri, pending.code_challenge, pending.scope, pending.resource, after(seconds(env.AUTH_CODE_TTL_SECONDS, 60)), isAdmin ? 1 : 0, email),
   ]);
+  if (results[2]?.meta.changes !== 1) {
+    log("auth.oauth.denied", { level: "warn", attrs: { client_id: pending.client_id, reason: "not_invited" } });
+    return refusal();
+  }
   log("auth.oauth.completed", { attrs: { client_id: pending.client_id, role } });
   return redirect(pending.redirect_uri, { code, state: clientState });
 }

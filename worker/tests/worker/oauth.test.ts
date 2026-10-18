@@ -35,6 +35,7 @@ let publicJwk: JsonWebKey & { kid: string };
 let idClaims: Record<string, unknown> = {};
 let signWith: CryptoKey | undefined;
 let tokenStatus = 200;
+let googleRefresh: string | undefined = GOOGLE_REFRESH;
 let lastNonce = "";
 
 async function idToken(claims: Record<string, unknown>): Promise<string> {
@@ -53,6 +54,7 @@ beforeEach(async () => {
   await call("/ops/reset", { method: "POST", headers: { Authorization: `Bearer ${OPS}` } });
   signWith = undefined;
   tokenStatus = 200;
+  googleRefresh = GOOGLE_REFRESH;
   idClaims = { email: "bob@test", email_verified: true, sub: "g-bob" };
   const realFetch = globalThis.fetch;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -69,7 +71,7 @@ beforeEach(async () => {
       if (tokenStatus !== 200) return Response.json({ error: "invalid_grant" }, { status: tokenStatus });
       const iat = Math.floor(Date.now() / 1000);
       const claims = { iss: ISSUER, aud: GOOGLE_CLIENT_ID, iat, exp: iat + 3600, nonce: lastNonce, ...idClaims };
-      return Response.json({ access_token: "a", id_token: await idToken(claims), refresh_token: GOOGLE_REFRESH });
+      return Response.json({ access_token: "a", id_token: await idToken(claims), refresh_token: googleRefresh });
     }
     return new Response("nope", { status: 404 });
   });
@@ -150,6 +152,12 @@ describe("POST /register", () => {
 
   test("omits client_name when not given", async () => {
     expect(await (await register({ redirect_uris: [REDIRECT] })).json()).not.toHaveProperty("client_name");
+  });
+
+  test.each([["not JSON", "{nope"], ["not an object", "[1]"]])("invalid_request: body %s", async (_name, raw) => {
+    const res = await call("/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: raw });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_request");
   });
 
   test.each([
@@ -270,6 +278,13 @@ describe("POST /authorize/consent", () => {
     expect(to.origin + to.pathname).toBe(REDIRECT);
     expect(to.searchParams.get("error")).toBe("access_denied");
     expect(to.searchParams.get("state")).toBe("cs1");
+  });
+
+  test("a failed Google discovery fetch leaves the approve retryable", async () => {
+    const id = await pendingRequest(await newClient());
+    vi.mocked(globalThis.fetch).mockImplementationOnce(async () => new Response("down", { status: 503 }));
+    await expect(consent(id, "approve")).rejects.toThrow();
+    expect((await consent(id, "approve")).status).toBe(302);
   });
 
   test("approve redirects to Google with every parameter, and only once", async () => {
@@ -425,12 +440,34 @@ describe("GET /callback", () => {
     }
   });
 
-  test("a later login keeps the user row and updates the role", async () => {
+  test("a later login updates the role and keeps the stored refresh token", async () => {
     await ops("/ops/invites", { email: "bob@test" });
     const client = await newClient();
     await login(client);
+    const row = () => env.DB.prepare("SELECT email, role, google_refresh_token_enc AS enc FROM users").all<{ email: string; role: string; enc: string }>();
+    const first = (await row()).results[0];
+    expect(first?.role).toBe("member");
+    googleRefresh = undefined;
+    idClaims = { email: "alice@test", email_verified: true, sub: "g-bob" };
     await login(client);
-    expect(await userCount()).toBe(1);
+    const { results } = await row();
+    expect(results).toHaveLength(1);
+    expect(results[0]).toEqual({ email: "alice@test", role: "admin", enc: first?.enc });
+  });
+
+  test("an invite revoked before the writes gives the 403 page and no row or code", async () => {
+    await ops("/ops/invites", { email: "bob@test" });
+    const client = await newClient();
+    const stub = vi.mocked(globalThis.fetch).getMockImplementation() as typeof fetch;
+    // Revoke while the callback talks to Google, after the request was used up.
+    vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/google/jwks")) await ops("/ops/invites/revoke", { email: "bob@test" });
+      return stub(input, init);
+    });
+    const res = await login(client);
+    expect(res.status).toBe(403);
+    expect(await userCount()).toBe(0);
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM oauth_codes").first<{ n: number }>())?.n).toBe(0);
   });
 
   test("the log events carry no secret, e-mail or sub", async () => {
