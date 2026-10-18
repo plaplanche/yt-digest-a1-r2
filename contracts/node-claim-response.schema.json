@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NodeClaimResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "jobs"
+  ],
+  "properties": {
+    "jobs": {
+      "type": "array",
+      "items": {
+        "title": "ClaimedJob",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "video_id",
+          "lease_id",
+          "lease_expires_at"
+        ],
+        "properties": {
+          "video_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{11}$"
+          },
+          "lease_id": {
+            "type": "string",
+            "minLength": 16
+          },
+          "lease_expires_at": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+          }
+        }
+      }
+    }
+  }
+}

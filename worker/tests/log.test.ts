@@ -23,6 +23,12 @@ test("writes one JSON line on stderr", () => {
   expect(line).toMatchObject({ attrs: { version: "0.1.0" }, ts: expect.stringMatching(/Z$/) });
 });
 
+test("accepts a lot 2 event", () => {
+  const lines = captureStderr();
+  log("job.claimed", { video_id: "dQw4w9WgXcQ", attrs: { node_id: "n1", attempt: 1, lease_seconds: 600 } });
+  expect(JSON.parse(lines[0] ?? "")).toMatchObject({ event: "job.claimed", service: "worker" });
+});
+
 test("throws on an event outside the catalogue", () => {
   const lines = captureStderr();
   expect(() => log("not.catalogued" as LogEventName)).toThrow();

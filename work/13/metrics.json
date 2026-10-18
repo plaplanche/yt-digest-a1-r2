@@ -1,0 +1,67 @@
+{
+  "attempts": {
+    "guard_violations": 0,
+    "pull_request": 0,
+    "push": 0
+  },
+  "blocking_red_at_delivery": 0,
+  "first_pass_verdict": "go",
+  "mode": "delivered",
+  "outcome": "delivered",
+  "rounds": 0,
+  "sessions": [
+    {
+      "cache_read_tokens": 422865,
+      "cache_write_tokens": 37722,
+      "cost_usd": 0.3277645,
+      "duration_s": 140.236,
+      "input_tokens": 32,
+      "model": "claude-sonnet-5-5",
+      "output_tokens": 13428,
+      "role": "implementer",
+      "round": 0,
+      "runtime": "claude-code",
+      "stop_reason": "finished"
+    },
+    {
+      "cache_read_tokens": 88959,
+      "cache_write_tokens": 35232,
+      "changed_lines": 876,
+      "cost_usd": 0.385233,
+      "duration_s": 46.414,
+      "input_tokens": 8,
+      "model": "claude-opus-5-5",
+      "output_tokens": 4159,
+      "role": "reviewer",
+      "round": 0,
+      "runtime": "claude-code",
+      "stop_reason": "finished"
+    }
+  ],
+  "started": "2026-10-18T05:44:25Z",
+  "steps": [
+    {
+      "at": "2026-10-18T05:44:25Z",
+      "name": "folder opened"
+    },
+    {
+      "at": "2026-10-18T05:46:46Z",
+      "name": "implementer session 1 stopped"
+    },
+    {
+      "at": "2026-10-18T05:47:12Z",
+      "name": "checks replayed"
+    },
+    {
+      "at": "2026-10-18T05:47:58Z",
+      "name": "reviewer session 2 stopped"
+    },
+    {
+      "at": "2026-10-18T05:47:59Z",
+      "name": "outcome: delivered"
+    }
+  ],
+  "surviving_processes": 0,
+  "ticket": 13,
+  "unchanged_fix_rounds": 0
+}
