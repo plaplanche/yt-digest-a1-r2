@@ -4,33 +4,31 @@ import type { LogEventName } from "../src/contracts/log-event";
 
 afterEach(() => vi.restoreAllMocks());
 
-function captureStderr(): string[] {
+function captureLines(): string[] {
   const lines: string[] = [];
-  vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
-    lines.push(String(chunk));
-    return true;
+  vi.spyOn(console, "log").mockImplementation((line: unknown) => {
+    lines.push(String(line));
   });
   return lines;
 }
 
-test("writes one JSON line on stderr", () => {
-  const lines = captureStderr();
+test("writes one JSON line on the console", () => {
+  const lines = captureLines();
   log("service.started", { attrs: { version: "0.1.0" }, request_id: "r1" });
   expect(lines).toHaveLength(1);
-  expect(lines[0]?.endsWith("\n")).toBe(true);
   const line: unknown = JSON.parse(lines[0] ?? "");
   expect(line).toMatchObject({ event: "service.started", service: "worker", level: "info", request_id: "r1" });
   expect(line).toMatchObject({ attrs: { version: "0.1.0" }, ts: expect.stringMatching(/Z$/) });
 });
 
 test("accepts a lot 2 event", () => {
-  const lines = captureStderr();
+  const lines = captureLines();
   log("job.claimed", { video_id: "dQw4w9WgXcQ", attrs: { node_id: "n1", attempt: 1, lease_seconds: 600 } });
   expect(JSON.parse(lines[0] ?? "")).toMatchObject({ event: "job.claimed", service: "worker" });
 });
 
 test("throws on an event outside the catalogue", () => {
-  const lines = captureStderr();
+  const lines = captureLines();
   expect(() => log("not.catalogued" as LogEventName)).toThrow();
   expect(lines).toEqual([]);
 });
