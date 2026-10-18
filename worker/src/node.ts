@@ -1,9 +1,12 @@
 import type { Env } from "./index";
 import { errorResponse, json, sha256Hex } from "./http";
 import { log } from "./log";
+import { handleRelease, handleResult, sweepExpired, validRelease, validResult } from "./leases";
 import type { NodeClaimRequest } from "./contracts/node-claim-request";
 import type { NodeClaimResponse } from "./contracts/node-claim-response";
 import type { NodeHeartbeatRequest } from "./contracts/node-heartbeat-request";
+import type { NodeReleaseRequest } from "./contracts/node-release-request";
+import type { NodeResultRequest } from "./contracts/node-result-request";
 import type { NodeHeartbeatResponse } from "./contracts/node-heartbeat-response";
 
 const DEFAULT_MAX_JOBS = 3;
@@ -57,7 +60,7 @@ async function readBody(request: Request): Promise<unknown> {
 
 export async function handleNode(request: Request, env: Env, path: string): Promise<Response> {
   const endpoint = path.slice("/node/".length);
-  if (request.method !== "POST" || (endpoint !== "heartbeat" && endpoint !== "claim")) {
+  if (request.method !== "POST" || !["heartbeat", "claim", "result", "release"].includes(endpoint)) {
     return errorResponse(404, "not_found", "Not found");
   }
 
@@ -70,12 +73,15 @@ export async function handleNode(request: Request, env: Env, path: string): Prom
   if (node.revoked_at !== null) return unauthorized("revoked");
 
   const body = await readBody(request);
-  if (endpoint === "heartbeat") {
-    if (!validHeartbeat(body)) return errorResponse(400, "invalid_request", "Invalid heartbeat body");
-    return heartbeat(env, node, body);
-  }
-  if (!validClaim(body)) return errorResponse(400, "invalid_request", "Invalid claim body");
-  return claim(env, node.node_id, body.max_jobs ?? DEFAULT_MAX_JOBS);
+  const valid =
+    endpoint === "heartbeat" ? validHeartbeat(body) : endpoint === "claim" ? validClaim(body) : endpoint === "result" ? validResult(body) : validRelease(body);
+  if (!valid) return errorResponse(400, "invalid_request", `Invalid ${endpoint} body`);
+  await sweepExpired(env);
+
+  if (endpoint === "heartbeat") return heartbeat(env, node, body as NodeHeartbeatRequest);
+  if (endpoint === "claim") return claim(env, node.node_id, (body as NodeClaimRequest).max_jobs ?? DEFAULT_MAX_JOBS);
+  if (endpoint === "result") return handleResult(env, node.node_id, body as NodeResultRequest);
+  return handleRelease(env, node.node_id, body as NodeReleaseRequest);
 }
 
 async function heartbeat(env: Env, node: { node_id: string; hourly_budget: number }, body: NodeHeartbeatRequest): Promise<Response> {
@@ -108,7 +114,7 @@ async function claim(env: Env, nodeId: string, maxJobs: number): Promise<Respons
     env.DB.prepare(
       `UPDATE jobs SET status = 'leased', leased_by = ?1, lease_id = ?2 || '.' || video_id, lease_expires_at = ?3,
          attempts = attempts + 1, tried_nodes = json_insert(tried_nodes, '$[#]', ?1)
-       WHERE status = 'queued' AND rowid IN (
+       WHERE status = 'queued' AND EXISTS (SELECT 1 FROM nodes WHERE node_id = ?1 AND revoked_at IS NULL) AND rowid IN (
          SELECT rowid FROM jobs
          WHERE status = 'queued' AND NOT EXISTS (SELECT 1 FROM json_each(jobs.tried_nodes) WHERE value = ?1)
          ORDER BY priority DESC, created_at ASC, video_id ASC LIMIT ?4)`,

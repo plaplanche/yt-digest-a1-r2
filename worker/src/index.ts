@@ -1,6 +1,7 @@
 import pkg from "../package.json";
 import { errorResponse, json, sha256, sha256Hex } from "./http";
 import { log } from "./log";
+import { revokeNode, sweepExpired } from "./leases";
 import { handleNode } from "./node";
 
 export interface Env {
@@ -98,6 +99,7 @@ async function enqueueJobs(request: Request, env: Env): Promise<Response> {
 }
 
 async function showJob(env: Env, videoId: string): Promise<Response> {
+  await sweepExpired(env);
   const row = await env.DB.prepare(
     "SELECT video_id, kind, priority, status, leased_by, lease_expires_at, attempts, tried_nodes, last_outcome, created_at, done_at FROM jobs WHERE video_id = ? AND kind = 'primary'",
   )
@@ -105,6 +107,13 @@ async function showJob(env: Env, videoId: string): Promise<Response> {
     .first<{ tried_nodes: string }>();
   if (row === null) return notFound();
   return json({ ...row, tried_nodes: JSON.parse(row.tried_nodes) as string[] });
+}
+
+async function showTranscript(env: Env, videoId: string): Promise<Response> {
+  const object = await env.TRANSCRIPTS.get(`transcripts/${videoId}.json`);
+  if (object === null) return notFound();
+  const { node_id, lease_id, produced_at } = object.customMetadata ?? {};
+  return json({ video_id: videoId, transcript: JSON.parse(await object.text()) as unknown, node_id, lease_id, produced_at });
 }
 
 async function reset(env: Env): Promise<Response> {
@@ -128,6 +137,10 @@ async function handleOps(request: Request, env: Env, path: string): Promise<Resp
   if (request.method === "POST" && path === "/ops/jobs") return enqueueJobs(request, env);
   const job = /^\/ops\/jobs\/([^/]+)$/.exec(path);
   if (request.method === "GET" && job?.[1] !== undefined) return showJob(env, job[1]);
+  const transcript = /^\/ops\/transcripts\/([^/]+)$/.exec(path);
+  if (request.method === "GET" && transcript?.[1] !== undefined) return showTranscript(env, transcript[1]);
+  const revoked = /^\/ops\/nodes\/([^/]+)$/.exec(path);
+  if (request.method === "DELETE" && revoked?.[1] !== undefined) return revokeNode(env, revoked[1]);
   return notFound();
 }
 
