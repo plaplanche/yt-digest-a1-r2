@@ -9,6 +9,9 @@ const MAX_ATTEMPTS = 3;
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 const OUTCOMES = ["ok", "no_transcript", "unavailable", "blocked", "error"];
 const TRANSCRIPT_KEYS = ["video_id", "status", "lang", "source", "word_count", "truncated", "sponsor_ratio", "pages"];
+// A reserved lease (state `storing`) is skipped by the sweep and the revocation while its R2 write runs;
+// past this grace a reservation left by a dead request is swept like an expired lease.
+const STORING_GRACE_MS = 60_000;
 const TRUNCATION_MARKER = "[…]";
 
 type Outcome = NodeResultRequest["outcome"];
@@ -60,6 +63,8 @@ interface EndedLease {
   event?: string;
   /** A result also needs the lease to be unexpired on the Worker's clock at the moment of the write. */
   unexpired?: boolean;
+  /** The lease state the end requires; `storing` is the reservation of an `ok` result (see handleResult). */
+  from?: "active" | "storing";
 }
 
 // Ends a lease and updates its job in one D1 batch. Both writes are conditional on the lease still
@@ -81,8 +86,8 @@ async function endLease(env: Env, end: EndedLease): Promise<{ status: NodeJobAck
     env.DB.prepare(
       `UPDATE leases SET state = ?1,
          response_json = (SELECT json_object('video_id', video_id, 'status', status) FROM jobs WHERE video_id = ?2 AND kind = 'primary')
-       WHERE lease_id = ?3 AND state = 'active' AND changes() > 0`,
-    ).bind(end.leaseState, end.videoId, end.leaseId),
+       WHERE lease_id = ?3 AND state = ?4 AND changes() > 0`,
+    ).bind(end.leaseState, end.videoId, end.leaseId, end.from ?? "active"),
     end.event === undefined
       ? env.DB.prepare("SELECT 1 WHERE changes() > 0")
       : env.DB.prepare("INSERT INTO node_events (node_id, ts, kind, video_id) SELECT ?1, ?2, ?3, ?4 WHERE changes() > 0").bind(end.nodeId, now, end.event, end.videoId),
@@ -96,15 +101,18 @@ async function endLease(env: Env, end: EndedLease): Promise<{ status: NodeJobAck
 // 8.6: every leased job whose lease expires at or before now goes through the failure handling.
 export async function sweepExpired(env: Env): Promise<void> {
   const { results } = await env.DB.prepare(
-    "SELECT video_id, lease_id, leased_by FROM jobs WHERE status = 'leased' AND lease_expires_at <= ?",
+    `SELECT video_id, lease_id, leased_by FROM jobs
+     WHERE status = 'leased' AND lease_expires_at <= ?1
+       AND lease_id IN (SELECT lease_id FROM leases WHERE state = 'active' OR (state = 'storing' AND expires_at <= ?2))`,
   )
-    .bind(new Date().toISOString())
+    .bind(new Date().toISOString(), new Date(Date.now() - STORING_GRACE_MS).toISOString())
     .all<{ video_id: string; lease_id: string; leased_by: string }>();
   for (const row of results) {
     const ended = await endLease(env, {
       leaseId: row.lease_id,
       videoId: row.video_id,
       nodeId: row.leased_by,
+      from: await leaseState(env, row.lease_id),
       leaseState: "expired",
       lastOutcome: "lease_expired",
       job: "fail",
@@ -114,6 +122,11 @@ export async function sweepExpired(env: Env): Promise<void> {
       log("job.lease_expired", { video_id: row.video_id, attrs: { node_id: row.leased_by, attempts: ended.attempts, status: ended.status } });
     }
   }
+}
+
+async function leaseState(env: Env, leaseId: string): Promise<"active" | "storing"> {
+  const row = await env.DB.prepare("SELECT state FROM leases WHERE lease_id = ?").bind(leaseId).first<{ state: string }>();
+  return row?.state === "storing" ? "storing" : "active";
 }
 
 interface LeaseRow {
@@ -168,23 +181,41 @@ export async function handleResult(env: Env, nodeId: string, body: NodeResultReq
     return errorResponse(422, "validation_failed", `The result is invalid: ${reason}`);
   }
 
+  const failing = body.outcome === "unavailable" || body.outcome === "blocked" || body.outcome === "error";
+  let from: "active" | "storing" = "active";
   if (body.outcome === "ok") {
+    // Reservation: only the request that moves the lease to `storing` (still active, unexpired, node not
+    // revoked) may write to R2; the sweep and the revocation skip a `storing` lease.
+    const now = new Date().toISOString();
+    const reserved = await env.DB.prepare(
+      `UPDATE leases SET state = 'storing'
+       WHERE lease_id = ?1 AND state = 'active' AND expires_at > ?2
+         AND EXISTS (SELECT 1 FROM nodes WHERE node_id = ?3 AND revoked_at IS NULL)`,
+    )
+      .bind(body.lease_id, now, nodeId)
+      .run();
+    if (reserved.meta.changes !== 1) {
+      await sweepExpired(env);
+      const current = await findLease(env, nodeId, body.lease_id);
+      return current?.state === "completed" ? stored(current) : stale(nodeId, videoId);
+    }
+    from = "storing";
     const key = `transcripts/${videoId}.json`;
     try {
       // Conditional put: null means the object already exists, which is kept as it is.
       await env.TRANSCRIPTS.put(key, JSON.stringify(body.transcript), {
         httpMetadata: { contentType: "application/json" },
-        customMetadata: { node_id: nodeId, lease_id: body.lease_id, produced_at: new Date().toISOString() },
+        customMetadata: { node_id: nodeId, lease_id: body.lease_id, produced_at: now },
         onlyIf: { etagDoesNotMatch: "*" },
       });
     } catch {
+      await env.DB.prepare("UPDATE leases SET state = 'active' WHERE lease_id = ? AND state = 'storing'").bind(body.lease_id).run();
       return errorResponse(503, "storage_error", "The transcript could not be stored");
     }
   }
 
-  const failing = body.outcome === "unavailable" || body.outcome === "blocked" || body.outcome === "error";
   const ended = await endLease(env, {
-    leaseId: body.lease_id, videoId, nodeId, leaseState: "completed", lastOutcome: body.outcome, job: failing ? "fail" : "done", event: `job_${body.outcome}`, unexpired: true,
+    leaseId: body.lease_id, videoId, nodeId, leaseState: "completed", lastOutcome: body.outcome, job: failing ? "fail" : "done", event: `job_${body.outcome}`, unexpired: from === "active", from,
   });
   if (ended === undefined) {
     // Lost a race with the sweep, a revocation or a retry of this very result.
@@ -207,14 +238,15 @@ export async function handleRelease(env: Env, nodeId: string, body: NodeReleaseR
     env.DB.prepare(
       `UPDATE jobs SET status = 'queued', leased_by = NULL, lease_id = NULL, lease_expires_at = NULL, attempts = attempts - 1,
          tried_nodes = (SELECT json_group_array(value) FROM json_each(tried_nodes) WHERE value != ?1), last_outcome = 'released'
-       WHERE video_id = ?2 AND kind = 'primary' AND status = 'leased' AND lease_id = ?3`,
-    ).bind(nodeId, videoId, body.lease_id),
+       WHERE video_id = ?2 AND kind = 'primary' AND status = 'leased' AND lease_id = ?3 AND lease_expires_at > ?4`,
+    ).bind(nodeId, videoId, body.lease_id, new Date().toISOString()),
     env.DB.prepare(
       `UPDATE leases SET state = 'released', response_json = json_object('video_id', ?1, 'status', 'queued')
        WHERE lease_id = ?2 AND state = 'active' AND changes() > 0`,
     ).bind(videoId, body.lease_id),
   ]);
   if (results[1]?.meta.changes !== 1) {
+    await sweepExpired(env); // a lease that expired since the first sweep ends as `expired`
     const current = await findLease(env, nodeId, body.lease_id);
     return current?.state === "released" ? stored(current) : stale(nodeId, videoId);
   }
@@ -228,12 +260,11 @@ export async function revokeNode(env: Env, nodeId: string): Promise<Response> {
   const node = await env.DB.prepare("SELECT revoked_at FROM nodes WHERE node_id = ?").bind(nodeId).first<{ revoked_at: string | null }>();
   if (node === null) return errorResponse(404, "not_found", "Not found");
   const answer = json({ node_id: nodeId, state: "disabled" });
-  if (node.revoked_at !== null) return answer;
+  // The lease ending runs even when the node is already revoked, so a retry finishes an interrupted revocation.
   const now = new Date().toISOString();
-  const revoked = await env.DB.prepare("UPDATE nodes SET state = 'disabled', state_since = ?1, revoked_at = ?1 WHERE node_id = ?2 AND revoked_at IS NULL")
+  await env.DB.prepare("UPDATE nodes SET state = 'disabled', state_since = ?1, revoked_at = ?1 WHERE node_id = ?2 AND revoked_at IS NULL")
     .bind(now, nodeId)
     .run();
-  if (revoked.meta.changes === 0) return answer;
   const { results } = await env.DB.prepare("SELECT lease_id, video_id FROM leases WHERE node_id = ? AND state = 'active'")
     .bind(nodeId)
     .all<{ lease_id: string; video_id: string }>();
@@ -244,6 +275,6 @@ export async function revokeNode(env: Env, nodeId: string): Promise<Response> {
     });
     if (ended !== undefined) count++;
   }
-  log("node.revoked", { attrs: { node_id: nodeId, leases_revoked: count } });
+  if (node.revoked_at === null || count > 0) log("node.revoked", { attrs: { node_id: nodeId, leases_revoked: count } });
   return answer;
 }

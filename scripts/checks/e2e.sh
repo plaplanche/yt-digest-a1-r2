@@ -28,5 +28,5 @@ elif ! (cd e2e && timeout 120 npx playwright install chromium); then
   projects=(--project=api)
 fi
 
-LEASE_SECONDS=2 ./scripts/stack.sh up
+LEASE_SECONDS=5 ./scripts/stack.sh up
 (cd e2e && npx playwright test ${projects[@]+"${projects[@]}"})

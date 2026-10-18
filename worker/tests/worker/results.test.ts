@@ -101,6 +101,44 @@ describe("POST /node/result", () => {
     expect(await (await env.TRANSCRIPTS.get(`transcripts/${VIDEO}.json`))?.text()).toBe("{}");
   });
 
+  test("a lease that expires before the R2 write reserves nothing: 409 and no object", async () => {
+    const { a } = (await setup(["a"])) as { a: string };
+    const [lease] = await claim(a);
+    const racing = {
+      // The lease check passes, then the lease reaches its expiry before the reservation.
+      prepare: (sql: string) => {
+        const statement = env.DB.prepare(sql);
+        if (!sql.startsWith("SELECT video_id, node_id, state")) return statement;
+        return { bind: (...args: unknown[]) => ({ first: async () => { const row = await statement.bind(...args).first(); vi.setSystemTime(new Date("2026-10-16T07:00:10.000Z")); return row; } }) };
+      },
+      batch: (statements: D1PreparedStatement[]) => env.DB.batch(statements),
+    } as unknown as D1Database;
+    const request = new Request("http://worker.test/node/result", {
+      method: "POST", headers: { Authorization: `Bearer ${a}` }, body: JSON.stringify({ lease_id: lease?.lease_id, outcome: "ok", transcript: transcript() }),
+    });
+    const res = await worker.fetch(request, { ...bindings, DB: racing });
+    expect(res.status).toBe(409);
+    expect(await env.TRANSCRIPTS.get(`transcripts/${VIDEO}.json`)).toBeNull();
+    expect(await job()).toMatchObject({ status: "queued", last_outcome: "lease_expired" });
+  });
+
+  test("a failing R2 write gives 503, keeps the lease and the job, and a retry succeeds", async () => {
+    const { a } = (await setup(["a"])) as { a: string };
+    const [lease] = await claim(a);
+    const body = { lease_id: lease?.lease_id, outcome: "ok", transcript: transcript() };
+    const failing = { ...env.TRANSCRIPTS, put: async () => { throw new Error("r2 down"); } } as unknown as R2Bucket;
+    const request = new Request("http://worker.test/node/result", { method: "POST", headers: { Authorization: `Bearer ${a}` }, body: JSON.stringify(body) });
+    const res = await worker.fetch(request, { ...bindings, TRANSCRIPTS: failing });
+    expect(res.status).toBe(503);
+    expect(await errorCode(res)).toBe("storage_error");
+    expect(await job()).toMatchObject({ status: "leased" });
+    expect(await count(`SELECT COUNT(*) AS c FROM leases WHERE lease_id = '${lease?.lease_id}' AND state = 'active'`)).toBe(1);
+    expect(await count("SELECT COUNT(*) AS c FROM node_events")).toBe(0);
+    const retry = await node(a, "result", body);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual({ video_id: VIDEO, status: "done" });
+  });
+
   test("a claim that races with a revocation leases nothing", async () => {
     const { a } = (await setup(["a"])) as { a: string };
     const racing = {
