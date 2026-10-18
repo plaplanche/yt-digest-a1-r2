@@ -98,7 +98,7 @@ up() {
   echo $! >>"$PIDS"
 
   local pid deadline=$((SECONDS + STACK_READY_TIMEOUT))
-  until curl -fsS -o /dev/null "$WORKER_URL/health" 2>/dev/null && curl -fsS -o /dev/null "$MOCKS_URL/health" 2>/dev/null; do
+  until curl -fsS --max-time 2 -o /dev/null "$WORKER_URL/health" 2>/dev/null && curl -fsS --max-time 2 -o /dev/null "$MOCKS_URL/health" 2>/dev/null; do
     while read -r pid; do
       kill -0 "$pid" 2>/dev/null || fail "a process exited early (see $LOGS)"
     done <"$PIDS"

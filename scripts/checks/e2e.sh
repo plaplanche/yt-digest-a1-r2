@@ -3,6 +3,21 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+collect() {
+  mkdir -p ci-artifacts
+  cp -r .stack/logs ci-artifacts/ 2>/dev/null || true
+  cp -r e2e/playwright-report ci-artifacts/ 2>/dev/null || true
+}
+
+finish() {
+  local status=$?
+  trap - EXIT
+  ((status == 0)) || collect
+  ./scripts/stack.sh down || true
+  exit "$status"
+}
+trap finish EXIT
+
 (cd e2e && npm ci)
 
 projects=()
@@ -13,16 +28,5 @@ elif ! (cd e2e && timeout 120 npx playwright install chromium); then
   projects=(--project=api)
 fi
 
-collect() {
-  mkdir -p ci-artifacts
-  cp -r .stack/logs ci-artifacts/ 2>/dev/null || true
-  cp -r e2e/playwright-report ci-artifacts/ 2>/dev/null || true
-}
-
-trap './scripts/stack.sh down' EXIT
 LEASE_SECONDS=2 ./scripts/stack.sh up
-(cd e2e && npx playwright test "${projects[@]}") || {
-  status=$?
-  collect
-  exit "$status"
-}
+(cd e2e && npx playwright test ${projects[@]+"${projects[@]}"})
