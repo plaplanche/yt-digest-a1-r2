@@ -75,14 +75,6 @@ async function authorizationCode(form: URLSearchParams, env: OAuthEnv, clientId:
   return issueTokens(env, { clientId, userSub: row.user_sub, familyId: randomToken(24), scope: SCOPE, resource, grantType: "authorization_code" });
 }
 
-interface RefreshRow {
-  client_id: string;
-  user_sub: string;
-  family_id: string;
-  scope: string;
-  resource: string;
-}
-
 async function refresh(form: URLSearchParams, env: OAuthEnv, clientId: string, resource: string): Promise<Response> {
   const presented = form.get("refresh_token");
   if (!presented) return tokenError(400, "invalid_request", "Missing parameter");
@@ -90,13 +82,30 @@ async function refresh(form: URLSearchParams, env: OAuthEnv, clientId: string, r
 
   const hash = await sha256Hex(presented);
   const nowIso = new Date().toISOString();
-  const used = await env.DB.prepare(
-    "UPDATE oauth_tokens SET used_at = ? WHERE token_hash = ? AND kind = 'refresh' AND client_id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ? RETURNING client_id, user_sub, family_id, scope, resource",
-  )
-    .bind(nowIso, hash, clientId, nowIso)
-    .first<RefreshRow>();
-  if (used !== null) {
-    return issueTokens(env, { clientId, userSub: used.user_sub, familyId: used.family_id, scope: used.scope, resource: used.resource, grantType: "refresh_token" });
+  const access = randomToken(32);
+  const newRefresh = randomToken(32);
+  const accessTtl = ttlMs(env.ACCESS_TOKEN_TTL_SECONDS, 3600);
+  const refreshTtl = ttlMs(env.REFRESH_TOKEN_TTL_SECONDS, 2592000);
+  // One atomic batch: both inserts copy the presented row and only fire while it is usable and its family
+  // has no revoked token; the mark-used update comes last, so a concurrent reuse cannot slip in between.
+  const insert = async (token: string, kind: string, ttl: number) =>
+    env.DB.prepare(
+      `INSERT INTO oauth_tokens (token_hash, kind, client_id, user_sub, family_id, scope, resource, expires_at)
+       SELECT ?, ?, client_id, user_sub, family_id, scope, resource, ? FROM oauth_tokens
+       WHERE token_hash = ? AND kind = 'refresh' AND client_id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?
+         AND NOT EXISTS (SELECT 1 FROM oauth_tokens f WHERE f.family_id = oauth_tokens.family_id AND f.revoked_at IS NOT NULL)`,
+    ).bind(await sha256Hex(token), kind, new Date(Date.now() + ttl).toISOString(), hash, clientId, nowIso);
+  const results = await env.DB.batch([
+    await insert(access, "access", accessTtl),
+    await insert(newRefresh, "refresh", refreshTtl),
+    env.DB.prepare("UPDATE oauth_tokens SET used_at = ? WHERE token_hash = ? AND kind = 'refresh' AND client_id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ? AND NOT EXISTS (SELECT 1 FROM oauth_tokens f WHERE f.family_id = oauth_tokens.family_id AND f.revoked_at IS NOT NULL)").bind(nowIso, hash, clientId, nowIso),
+  ]);
+  if (results[0].meta.changes === 1 && results[1].meta.changes === 1 && results[2].meta.changes === 1) {
+    log("auth.token.issued", { attrs: { client_id: clientId, grant_type: "refresh_token" } });
+    return new Response(
+      JSON.stringify({ access_token: access, token_type: "Bearer", expires_in: accessTtl / 1000, refresh_token: newRefresh, scope: SCOPE }),
+      { status: 200, headers: { "Content-Type": "application/json", ...NO_STORE } },
+    );
   }
   const known = await env.DB.prepare("SELECT family_id, used_at FROM oauth_tokens WHERE token_hash = ? AND kind = 'refresh' AND client_id = ?")
     .bind(hash, clientId)
@@ -105,14 +114,14 @@ async function refresh(form: URLSearchParams, env: OAuthEnv, clientId: string, r
     const revoked = await env.DB.prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL")
       .bind(nowIso, known.family_id)
       .run();
-    log("auth.refresh.reuse_detected", { level: "warn", attrs: { client_id: clientId, revoked: revoked.meta.changes } });
+    if (revoked.meta.changes > 0) log("auth.refresh.reuse_detected", { level: "warn", attrs: { client_id: clientId, revoked: revoked.meta.changes } });
   }
   return tokenError(400, "invalid_grant", "Invalid refresh token");
 }
 
 // 10.5
 export async function token(request: Request, env: OAuthEnv): Promise<Response> {
-  if (!(request.headers.get("Content-Type") ?? "").toLowerCase().startsWith("application/x-www-form-urlencoded")) {
+  if ((request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase() !== "application/x-www-form-urlencoded") {
     return tokenError(400, "invalid_request", "The body must be form-encoded");
   }
   const form = new URLSearchParams();

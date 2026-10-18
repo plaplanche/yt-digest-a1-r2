@@ -131,6 +131,7 @@ describe("POST /token, authorization_code (10.5)", () => {
   test("a body that is not form-encoded gives invalid_request", async () => {
     const fields = exchangeFields(await seedCode());
     await expectError(await token(fields, { "Content-Type": "application/json" }), 400, "invalid_request");
+    await expectError(await token(fields, { "Content-Type": "application/x-www-form-urlencodedx" }), 400, "invalid_request");
     const json = await call("/token", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) });
     await expectError(json, 400, "invalid_request");
     await expectError(await call("/token", { method: "POST", body: "grant_type=refresh_token" }), 400, "invalid_request");
@@ -223,6 +224,29 @@ describe("POST /token, refresh_token (10.5)", () => {
     await expectError(await refreshWith(second.refresh_token), 400, "invalid_grant");
     expect(await accepted(other.access_token)).toBe(true);
     expect((await refreshWith(other.refresh_token)).status).toBe(200);
+  });
+
+  test("a family holding a revoked token issues nothing and leaves the refresh token unused", async () => {
+    const pair = await exchange();
+    await env.DB.prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE kind = 'access'").bind(new Date().toISOString()).run();
+    await expectError(await refreshWith(pair.refresh_token), 400, "invalid_grant");
+    const rows = await env.DB.prepare("SELECT kind, used_at FROM oauth_tokens").all<{ kind: string; used_at: string | null }>();
+    expect(rows.results).toHaveLength(2);
+    expect(rows.results.every((r) => r.used_at === null)).toBe(true);
+  });
+
+  test("presenting a used token again after its family was revoked logs nothing", async () => {
+    const first = await exchange();
+    await refreshWith(first.refresh_token);
+    await expectError(await refreshWith(first.refresh_token), 400, "invalid_grant");
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => void lines.push(String(line)));
+    try {
+      await expectError(await refreshWith(first.refresh_token), 400, "invalid_grant");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines).toHaveLength(0);
   });
 
   test("unknown, expired, revoked and other-client refresh tokens give invalid_grant without revoking", async () => {
