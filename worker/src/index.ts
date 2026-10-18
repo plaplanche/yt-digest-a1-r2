@@ -4,6 +4,7 @@ import { log } from "./log";
 import { revokeNode, sweepExpired } from "./leases";
 import { handleNode } from "./node";
 import { authorizationServer, authorize, callback, consent, protectedResource, register, type OAuthEnv } from "./oauth";
+import { token } from "./token";
 
 export interface Env extends OAuthEnv {
   DB: D1Database;
@@ -181,6 +182,7 @@ export default {
     }
     if (get && pathname === "/.well-known/oauth-authorization-server") return authorizationServer(env, request);
     if (request.method === "POST" && pathname === "/register") return register(request, env);
+    if (request.method === "POST" && pathname === "/token") return token(request, env);
     if (get && pathname === "/authorize") return authorize(request, env);
     if (request.method === "POST" && pathname === "/authorize/consent") return consent(request, env);
     if (get && pathname === "/callback") return callback(request, env);
