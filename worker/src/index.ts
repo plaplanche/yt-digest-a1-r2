@@ -1,8 +1,6 @@
 import pkg from "../package.json";
 import type { ErrorResponse } from "./contracts/error";
 
-export const name = "yt-digest-worker";
-
 export interface Env {
   DB: D1Database;
   TRANSCRIPTS: R2Bucket;
