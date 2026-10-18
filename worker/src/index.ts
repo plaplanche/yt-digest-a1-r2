@@ -3,8 +3,9 @@ import { errorResponse, json, sha256, sha256Hex } from "./http";
 import { log } from "./log";
 import { revokeNode, sweepExpired } from "./leases";
 import { handleNode } from "./node";
+import { authorizationServer, authorize, callback, consent, protectedResource, register, type OAuthEnv } from "./oauth";
 
-export interface Env {
+export interface Env extends OAuthEnv {
   DB: D1Database;
   TRANSCRIPTS: R2Bucket;
   OPS_TOKEN?: string;
@@ -174,6 +175,15 @@ export default {
     const { pathname } = new URL(request.url);
     if (pathname === "/ops" || pathname.startsWith("/ops/")) return handleOps(request, env, pathname);
     if (pathname.startsWith("/node/")) return handleNode(request, env, pathname);
+    const get = request.method === "GET";
+    if (get && (pathname === "/.well-known/oauth-protected-resource" || pathname === "/.well-known/oauth-protected-resource/mcp")) {
+      return protectedResource(env, request);
+    }
+    if (get && pathname === "/.well-known/oauth-authorization-server") return authorizationServer(env, request);
+    if (request.method === "POST" && pathname === "/register") return register(request, env);
+    if (get && pathname === "/authorize") return authorize(request, env);
+    if (request.method === "POST" && pathname === "/authorize/consent") return consent(request, env);
+    if (get && pathname === "/callback") return callback(request, env);
     if (request.method === "GET" && pathname === "/health") return json({ status: "ok", version: pkg.version });
     return notFound();
   },
