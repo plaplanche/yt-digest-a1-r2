@@ -24,9 +24,34 @@ def literal(values: list[Any]) -> str:
     return ", ".join(json.dumps(v) if v is not None else "None" for v in values)
 
 
+def ref_title(ref: str) -> str:
+    """Returns the title (the generated type name) of a referenced schema file."""
+    return str(json.loads((ROOT / "contracts" / ref).read_text())["title"])
+
+
+def ref_module(ref: str) -> str:
+    return ref.removesuffix(".schema.json").replace("-", "_")
+
+
+def split_ref(schema: dict[str, Any]) -> tuple[str | None, bool]:
+    """Returns the $ref of a property that is a ref or a ref-or-null, and its nullability."""
+    if "$ref" in schema:
+        return schema["$ref"], False
+    options = schema.get("anyOf", [])
+    refs = [o["$ref"] for o in options if "$ref" in o]
+    if refs:
+        return refs[0], any(o.get("type") == "null" for o in options)
+    return None, False
+
+
 def py_type(schema: dict[str, Any], uses: set[str]) -> tuple[str, list[str]]:
     """Returns the annotation and the Field(...) arguments of a property schema."""
     args: list[str] = []
+    ref, ref_nullable = split_ref(schema)
+    if ref:
+        uses.add("ref:" + ref)
+        title = ref_title(ref)
+        return (f"{title} | None" if ref_nullable else title), args
     types = schema.get("type", [])
     types = types if isinstance(types, list) else [types]
     nullable = "null" in types
@@ -48,10 +73,16 @@ def py_type(schema: dict[str, Any], uses: set[str]) -> tuple[str, list[str]]:
         elif kind == "array":
             item, _ = py_type(schema["items"], uses)
             base = f"list[{item}]"
+        elif "properties" in schema:
+            base = schema["title"]
         else:
             base = "dict[str, object]"
     if "pattern" in schema:
         args.append(f'pattern=r"{schema["pattern"]}"')
+    if "minLength" in schema:
+        args.append(f"min_length={schema['minLength']}")
+    if "maxLength" in schema:
+        args.append(f"max_length={schema['maxLength']}")
     if "minimum" in schema:
         args.append(f"ge={schema['minimum']}")
     if "maximum" in schema:
@@ -59,8 +90,17 @@ def py_type(schema: dict[str, Any], uses: set[str]) -> tuple[str, list[str]]:
     return (f"{base} | None" if nullable else base), args
 
 
-def gen_python(schema: dict[str, Any], schema_file: str) -> str:
-    uses: set[str] = set()
+def nested_objects(schema: dict[str, Any]) -> list[dict[str, Any]]:
+    """Returns the titled object schemas nested in the properties, innermost first."""
+    found: list[dict[str, Any]] = []
+    for prop in schema["properties"].values():
+        node = prop.get("items", prop) if prop.get("type") == "array" else prop
+        if node.get("type") == "object" and "properties" in node:
+            found += nested_objects(node) + [node]
+    return found
+
+
+def py_class(schema: dict[str, Any], uses: set[str]) -> str:
     required = set(schema["required"])
     fields: list[str] = []
     for name, prop in schema["properties"].items():
@@ -75,12 +115,26 @@ def gen_python(schema: dict[str, Any], schema_file: str) -> str:
             uses.add("Field")
             line = f"    {name}: {annotation} = Field({', '.join(args)})"
             if len(line) > 88:  # the layout `ruff format` gives a single long argument
-                line = f"    {name}: {annotation} = Field(\n        {', '.join(args)}\n    )"
+                inner = f"        {', '.join(args)}"
+                if len(inner) > 88:  # one argument per line, with a trailing comma
+                    inner = "".join(f"        {a},\n" for a in args).rstrip("\n")
+                    line = f"    {name}: {annotation} = Field(\n{inner}\n    )"
+                else:
+                    line = f"    {name}: {annotation} = Field(\n{inner}\n    )"
         else:
             line = f"    {name}: {annotation}"
-        if name not in required:
+        if name not in required and not annotation.endswith(" | None"):
             line += "  # type: ignore[assignment]"
         fields.append(line)
+    out = f"class {schema['title']}(BaseModel):\n"
+    out += '    model_config = ConfigDict(extra="forbid", strict=True)\n\n'
+    return out + "\n".join(fields) + "\n"
+
+
+def gen_python(schema: dict[str, Any], schema_file: str) -> str:
+    uses: set[str] = set()
+    classes = [py_class(n, uses) for n in nested_objects(schema)]
+    classes.append(py_class(schema, uses))
     out = header("#", schema_file) + "\n"
     if "StrEnum" in uses:
         out += "from enum import StrEnum\n"
@@ -89,20 +143,24 @@ def gen_python(schema: dict[str, Any], schema_file: str) -> str:
     if "StrEnum" in uses or "Literal" in uses:
         out += "\n"
     out += "from pydantic import BaseModel, ConfigDict"
-    out += ", Field\n\n\n" if "Field" in uses else "\n\n\n"
+    out += ", Field\n" if "Field" in uses else "\n"
+    for ref in sorted(u[4:] for u in uses if u.startswith("ref:")):
+        out += f"\nfrom yt_digest_node.contracts.{ref_module(ref)} import {ref_title(ref)}\n"
+    out += "\n\n"
     if "StrEnum" in uses:
         out += f"class {EVENT_ENUM}(StrEnum):\n"
         for value in schema["properties"]["event"]["enum"]:
             member = value.replace(".", "_").upper()
             out += f'    {member} = "{value}"\n'
         out += "\n\n"
-    out += f"class {schema['title']}(BaseModel):\n"
-    out += '    model_config = ConfigDict(extra="forbid", strict=True)\n\n'
-    out += "\n".join(fields) + "\n"
-    return out
+    return out + "\n\n".join(classes)
 
 
 def ts_type(schema: dict[str, Any]) -> str:
+    ref, ref_nullable = split_ref(schema)
+    if ref:
+        title = ref_title(ref)
+        return f"{title} | null" if ref_nullable else title
     types = schema.get("type", [])
     types = types if isinstance(types, list) else [types]
     nullable = "null" in types
@@ -120,27 +178,40 @@ def ts_type(schema: dict[str, Any]) -> str:
         elif kind == "array":
             item = ts_type(schema["items"])
             base = f"({item})[]" if " " in item else f"{item}[]"
+        elif "properties" in schema:
+            base = schema["title"]
         else:
             base = "Record<string, unknown>"
     return f"{base} | null" if nullable else base
 
 
-def gen_typescript(schema: dict[str, Any], schema_file: str) -> str:
+def ts_interface(schema: dict[str, Any]) -> str:
     required = set(schema["required"])
+    out = f"export interface {schema['title']} {{\n"
+    for name, prop in schema["properties"].items():
+        optional = "" if name in required else "?"
+        annotation = EVENT_ENUM if name == "event" else ts_type(prop)
+        out += f"  {name}{optional}: {annotation};\n"
+    return out + "}\n"
+
+
+def gen_typescript(schema: dict[str, Any], schema_file: str) -> str:
     out = header("//", schema_file) + "\n"
+    refs = {
+        ref for prop in schema["properties"].values() if (ref := split_ref(prop)[0])
+    }
+    for ref in sorted(refs):
+        out += f'import type {{ {ref_title(ref)} }} from "./{ref.removesuffix(".schema.json")}";\n'
+    if refs:
+        out += "\n"
     if "event" in schema["properties"]:
         names = ",\n".join(
             f"  {json.dumps(v)}" for v in schema["properties"]["event"]["enum"]
         )
         out += f"export const LOG_EVENT_NAMES = [\n{names},\n] as const;\n\n"
         out += f"export type {EVENT_ENUM} = (typeof LOG_EVENT_NAMES)[number];\n\n"
-    out += f"export interface {schema['title']} {{\n"
-    for name, prop in schema["properties"].items():
-        optional = "" if name in required else "?"
-        annotation = EVENT_ENUM if name == "event" else ts_type(prop)
-        out += f"  {name}{optional}: {annotation};\n"
-    out += "}\n"
-    return out
+    parts = [ts_interface(n) for n in nested_objects(schema)]
+    return out + "\n".join(parts + [ts_interface(schema)])
 
 
 def generate() -> dict[str, str]:

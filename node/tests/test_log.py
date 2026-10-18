@@ -45,3 +45,8 @@ def test_emit_rejects_an_unknown_field(name: str) -> None:
 def test_emit_rejects_a_bad_level() -> None:
     with pytest.raises(ValueError):
         emit("service.started", level="fatal")
+
+
+def test_emit_accepts_a_lot_2_event(capsys: pytest.CaptureFixture[str]) -> None:
+    emit("worker.call", attrs={"endpoint": "claim", "status": 200, "duration_ms": 12})
+    assert json.loads(capsys.readouterr().err)["event"] == "worker.call"
