@@ -19,5 +19,5 @@ export function log(event: LogEventName, fields: LogFields = {}): void {
     throw new Error(`unknown log level: ${String(level)}`);
   }
   const line: LogEvent = { ts: new Date().toISOString(), service: "worker", event, attrs: {}, ...fields, level };
-  process.stderr.write(`${JSON.stringify(line)}\n`);
+  console.log(JSON.stringify(line));
 }
